@@ -3,9 +3,9 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class Direction(str, Enum):
@@ -35,6 +35,17 @@ class CategorySign(str, Enum):
     BOTH = "BOTH"
 
 
+def _uppercase_str(value: Any) -> Any:
+    if isinstance(value, str):
+        upper = value.upper()
+        if upper == "OUTFLOWS":
+            return "OUTFLOW"
+        if upper == "INFLOWS":
+            return "INFLOW"
+        return upper
+    return value
+
+
 class CategorySpecExtract(BaseModel):
     include_keywords: list[str] = Field(
         description="Keywords or category labels included in the numerator or sum.",
@@ -61,6 +72,11 @@ class CategorySpecExtract(BaseModel):
         description="Verbatim quote about auditor reclassifications for this leg.",
     )
 
+    @field_validator("sign", mode="before")
+    @classmethod
+    def _normalize_sign(cls, value: Any) -> Any:
+        return _uppercase_str(value)
+
 
 class MetricSpecExtract(BaseModel):
     kind: MetricKind
@@ -76,11 +92,18 @@ class MetricSpecExtract(BaseModel):
         description="Verbatim quote stating borrower-only or group/consolidated scope.",
     )
     notes: str = Field(
-        description="Full verbatim formulation of how the metric is computed.",
+        default="",
+        description="Optional notes for nested trigger metrics (springing conditions).",
     )
     notes_quote: str = Field(
-        description="Verbatim quote backing the metric definition (may match notes).",
+        default="",
+        description="Optional verbatim quote for nested trigger metric notes.",
     )
+
+    @field_validator("kind", "scope", mode="before")
+    @classmethod
+    def _normalize_enums(cls, value: Any) -> Any:
+        return _uppercase_str(value)
 
 
 class SpringingConditionExtract(BaseModel):
@@ -96,6 +119,13 @@ class SpringingConditionExtract(BaseModel):
     condition_quote: str = Field(
         description="Verbatim quote for the full springing applicability condition.",
     )
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def _coerce_value(cls, value: Any) -> Any:
+        if isinstance(value, (int, float, str)):
+            return Decimal(str(value))
+        return value
 
 
 class CovenantExtract(BaseModel):
@@ -123,6 +153,12 @@ class CovenantExtract(BaseModel):
         description="Verbatim quote showing USD amount or ratio/multiplier unit.",
     )
     metric: MetricSpecExtract
+    notes: str = Field(
+        description="Full verbatim formulation of how the metric is computed.",
+    )
+    notes_quote: str = Field(
+        description="Verbatim quote backing the metric definition (may match notes).",
+    )
     period_start: date
     period_end: date
     period_quote: str = Field(
@@ -135,3 +171,35 @@ class CovenantExtract(BaseModel):
             "(e.g. only if some quantity exceeds a value). Otherwise null."
         ),
     )
+
+    @field_validator("direction", "threshold_unit", mode="before")
+    @classmethod
+    def _normalize_enums(cls, value: Any) -> Any:
+        return _uppercase_str(value)
+
+    @field_validator("threshold", mode="before")
+    @classmethod
+    def _coerce_threshold(cls, value: Any) -> Any:
+        if isinstance(value, (int, float)):
+            return Decimal(str(value))
+        return value
+
+    @field_validator("period_start", "period_end", mode="before")
+    @classmethod
+    def _coerce_period_date(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return date.fromisoformat(value)
+        return value
+
+    @model_validator(mode="before")
+    @classmethod
+    def _promote_metric_notes(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        metric = data.get("metric")
+        if isinstance(metric, dict):
+            if data.get("notes") is None and metric.get("notes"):
+                data["notes"] = metric["notes"]
+            if data.get("notes_quote") is None and metric.get("notes_quote"):
+                data["notes_quote"] = metric["notes_quote"]
+        return data

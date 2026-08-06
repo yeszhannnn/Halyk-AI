@@ -163,7 +163,7 @@ def _keyword_matches(
         "капитальные затраты",
         "совокупных капитальных затрат",
         "совокупные капитальные затраты заёмщика",
-    }:
+    } or ("капитальных затрат" in key and "заёмщика" in key):
         return _is_capex_row(row, group_scope=group_scope)
 
     if key in {
@@ -213,7 +213,7 @@ def _keyword_matches(
             return False
         return _counterparty_matches(row, _related_counterparties(parties))
 
-    if "капитальные активы, переданные неограниченным дочерним организациям" in key:
+    if "неограниченным дочерним организациям" in key and "капитал" in key:
         if category != "capex" or parties is None:
             return False
         return _counterparty_matches(row, _unrestricted_counterparties(parties))
@@ -645,17 +645,33 @@ def relevant_row_indices(
     period = (_parse_date(covenant["period"][0]), _parse_date(covenant["period"][1]))
     scenario_id = covenant["scenario_id"]
     metric = covenant["metric"]
+    scope = metric.get("scope", "BORROWER")
+    group_scope = scope == "GROUP"
+    specs: list[dict[str, Any] | None]
+    if metric.get("kind") == "RATIO":
+        specs = [metric["numerator"], metric.get("denominator")]
+    else:
+        specs = [metric["numerator"], metric.get("denominator")]
+
     indices: list[int] = []
     for index, row in enumerate(ledger):
-        if row.get("scenario_id") != scenario_id or row.get("excluded"):
+        if row.get("scenario_id") != scenario_id:
+            continue
+        if row.get("excluded"):
             continue
         if not _in_period(row, period):
             continue
         matched = False
-        for spec in (metric["numerator"], metric.get("denominator")):
+        for spec in specs:
             if spec is None:
                 continue
-            if _row_matches_spec(row, spec, period=period, parties=parties):
+            if _row_matches_spec(
+                row,
+                spec,
+                period=period,
+                parties=parties,
+                group_scope=group_scope,
+            ):
                 matched = True
                 break
         if matched:

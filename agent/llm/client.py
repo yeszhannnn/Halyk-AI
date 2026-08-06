@@ -5,20 +5,25 @@ import base64
 import hashlib
 import json
 import random
+import re
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
 import instructor
+from instructor.core import InstructorRetryException, ResponseParsingError
 from openai import APIConnectionError, APITimeoutError, AsyncOpenAI, RateLimitError
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError as PydanticValidationError
 
 from agent.config import BUDGET_USD, MAX_CONCURRENT, MODEL_ID, OPENAI_SEED, TEMPERATURE
 
 T = TypeVar("T", bound=BaseModel)
 
 CACHE_DIR = Path(".cache/llm")
+MAX_TRANSPORT_RETRIES = 5
+MAX_VALIDATION_RETRIES = 1
+_RETRY_BODY_HINT = re.compile(r"try again in (\d+(?:\.\d+)?)\s*s", re.IGNORECASE)
 
 MODEL_PRICING_PER_MILLION: dict[str, tuple[Decimal, Decimal]] = {
     "gpt-4o": (Decimal("2.50"), Decimal("10.00")),
@@ -28,6 +33,14 @@ MODEL_PRICING_PER_MILLION: dict[str, tuple[Decimal, Decimal]] = {
 
 class BudgetExceededError(RuntimeError):
     pass
+
+
+class LLMValidationError(RuntimeError):
+    """Raised when the model output cannot be parsed into the response schema."""
+
+    def __init__(self, message: str, *, raw_output: Any = None) -> None:
+        super().__init__(message)
+        self.raw_output = raw_output
 
 
 @dataclass
@@ -164,23 +177,55 @@ def _ensure_budget() -> None:
 
 
 def _retry_after_seconds(exc: RateLimitError) -> float | None:
-    headers = getattr(exc, "response", None)
-    if headers is None:
-        return None
-    header_value = headers.headers.get("retry-after")
-    if header_value is None:
-        return None
-    try:
-        return float(header_value)
-    except ValueError:
-        return None
+    response = getattr(exc, "response", None)
+    if response is not None:
+        header_value = response.headers.get("retry-after")
+        if header_value is not None:
+            try:
+                return float(header_value)
+            except ValueError:
+                pass
+
+    for chunk in (str(exc), str(getattr(exc, "body", ""))):
+        match = _RETRY_BODY_HINT.search(chunk)
+        if match:
+            return float(match.group(1))
+    return None
+
+
+def _is_transport_error(exc: Exception) -> bool:
+    return isinstance(exc, (RateLimitError, APIConnectionError, APITimeoutError))
+
+
+def _is_validation_error(exc: Exception) -> bool:
+    return isinstance(
+        exc,
+        (
+            InstructorRetryException,
+            PydanticValidationError,
+            ResponseParsingError,
+            LLMValidationError,
+        ),
+    )
+
+
+def _format_validation_failure(exc: Exception) -> tuple[str, Any]:
+    if isinstance(exc, InstructorRetryException):
+        raw = exc.last_completion
+        lines = [f"validation failed after {exc.n_attempts} attempt(s)"]
+        for attempt in exc.failed_attempts:
+            lines.append(f"  attempt {attempt.attempt_number}: {attempt.exception}")
+        if raw is not None:
+            lines.append(f"raw model output: {raw}")
+        return "\n".join(lines), raw
+    return str(exc), None
 
 
 async def _sleep_with_backoff(attempt: int, exc: Exception | None = None) -> None:
     if isinstance(exc, RateLimitError):
         retry_after = _retry_after_seconds(exc)
         if retry_after is not None:
-            await asyncio.sleep(retry_after)
+            await asyncio.sleep(retry_after + random.uniform(0, 0.25))
             return
 
     base = min(60.0, 2**attempt)
@@ -199,7 +244,42 @@ class LLMClient:
         self.counter = counter or RUN_COUNTER
         self._semaphore = semaphore or asyncio.Semaphore(MAX_CONCURRENT)
         self.model = model or MODEL_ID
-        self._client = instructor.from_openai(AsyncOpenAI())
+        self._client = instructor.from_openai(AsyncOpenAI(max_retries=0))
+
+    async def _request_with_retries(
+        self,
+        *,
+        response_model: type[T],
+        messages: list[dict[str, Any]],
+        request_params: dict[str, Any],
+    ) -> tuple[T, Any]:
+        last_exc: Exception | None = None
+        max_transport_attempts = MAX_TRANSPORT_RETRIES + 1
+        for transport_attempt in range(max_transport_attempts):
+            try:
+                async with self._semaphore:
+                    _ensure_budget()
+                    return await self._client.chat.completions.create_with_completion(
+                        model=self.model,
+                        messages=messages,
+                        response_model=response_model,
+                        max_retries=MAX_VALIDATION_RETRIES,
+                        **request_params,
+                    )
+            except BudgetExceededError:
+                raise
+            except Exception as exc:
+                last_exc = exc
+                if _is_validation_error(exc):
+                    message, raw = _format_validation_failure(exc)
+                    raise LLMValidationError(message, raw_output=raw) from exc
+                if transport_attempt >= MAX_TRANSPORT_RETRIES or not _is_transport_error(exc):
+                    break
+                await _sleep_with_backoff(transport_attempt, exc)
+
+        raise RuntimeError(
+            f"LLM transport request failed after {max_transport_attempts} attempts",
+        ) from last_exc
 
     async def complete(
         self,
@@ -229,44 +309,26 @@ class LLMClient:
         self.counter.cache_misses += 1
         _ensure_budget()
 
-        last_exc: Exception | None = None
-        for attempt in range(6):
-            try:
-                async with self._semaphore:
-                    _ensure_budget()
-                    parsed, completion = await self._client.chat.completions.create_with_completion(
-                        model=self.model,
-                        messages=messages,
-                        response_model=response_model,
-                        **request_params,
-                    )
-                usage = getattr(completion, "usage", None)
-                usage_dict = {
-                    "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
-                    "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
-                    "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
-                }
-                cost = _record_usage(self.model, usage, self.counter)
-                if use_cache:
-                    _write_cache(
-                        cache_key,
-                        response=parsed,
-                        usage=usage_dict,
-                        cost_usd=cost,
-                    )
-                return parsed
-            except BudgetExceededError:
-                raise
-            except (RateLimitError, APIConnectionError, APITimeoutError) as exc:
-                last_exc = exc
-                await _sleep_with_backoff(attempt, exc)
-            except Exception as exc:
-                last_exc = exc
-                if attempt >= 5:
-                    break
-                await _sleep_with_backoff(attempt, exc)
-
-        raise RuntimeError("LLM request failed after retries") from last_exc
+        parsed, completion = await self._request_with_retries(
+            response_model=response_model,
+            messages=messages,
+            request_params=request_params,
+        )
+        usage = getattr(completion, "usage", None)
+        usage_dict = {
+            "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
+            "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
+            "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
+        }
+        cost = _record_usage(self.model, usage, self.counter)
+        if use_cache:
+            _write_cache(
+                cache_key,
+                response=parsed,
+                usage=usage_dict,
+                cost_usd=cost,
+            )
+        return parsed
 
     async def complete_verified(
         self,
@@ -360,41 +422,23 @@ class LLMClient:
         self.counter.cache_misses += 1
         _ensure_budget()
 
-        last_exc: Exception | None = None
-        for attempt in range(6):
-            try:
-                async with self._semaphore:
-                    _ensure_budget()
-                    parsed, completion = await self._client.chat.completions.create_with_completion(
-                        model=self.model,
-                        messages=messages,
-                        response_model=response_model,
-                        **request_params,
-                    )
-                usage = getattr(completion, "usage", None)
-                usage_dict = {
-                    "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
-                    "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
-                    "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
-                }
-                cost = _record_usage(self.model, usage, self.counter)
-                if use_cache:
-                    _write_cache(
-                        cache_key,
-                        response=parsed,
-                        usage=usage_dict,
-                        cost_usd=cost,
-                    )
-                return parsed
-            except BudgetExceededError:
-                raise
-            except (RateLimitError, APIConnectionError, APITimeoutError) as exc:
-                last_exc = exc
-                await _sleep_with_backoff(attempt, exc)
-            except Exception as exc:
-                last_exc = exc
-                if attempt >= 5:
-                    break
-                await _sleep_with_backoff(attempt, exc)
-
-        raise RuntimeError("Vision LLM request failed after retries") from last_exc
+        parsed, completion = await self._request_with_retries(
+            response_model=response_model,
+            messages=messages,
+            request_params=request_params,
+        )
+        usage = getattr(completion, "usage", None)
+        usage_dict = {
+            "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
+            "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
+            "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
+        }
+        cost = _record_usage(self.model, usage, self.counter)
+        if use_cache:
+            _write_cache(
+                cache_key,
+                response=parsed,
+                usage=usage_dict,
+                cost_usd=cost,
+            )
+        return parsed

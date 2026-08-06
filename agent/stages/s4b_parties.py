@@ -27,6 +27,10 @@ EXTRACTOR = "s4b_parties"
 TEXT_CONFIDENCE = Decimal("0.95")
 TEXT_UNVERIFIED_CONFIDENCE = Decimal("0.70")
 OCR_CONFIDENCE = Decimal("0.60")
+DIRECTION_BY_SEMANTICS = {
+    "RELATED_PARTY": "AT_OR_ABOVE",
+    "UNRESTRICTED_SUBSIDIARY": "BELOW",
+}
 
 SYSTEM_PROMPT = """You extract KYC ownership/perimeter data from Russian/English bank dossiers.
 
@@ -145,14 +149,23 @@ def _serialize_provenance(
     }
 
 
+def _direction_for_semantics(table_semantics: str) -> str:
+    direction = DIRECTION_BY_SEMANTICS.get(table_semantics)
+    if direction is None:
+        raise ValueError(f"unsupported table_semantics: {table_semantics}")
+    return direction
+
+
 def _row_is_related(
     ownership_pct: Decimal,
     threshold: Decimal,
-    table_semantics: str,
+    direction: str,
 ) -> bool:
-    if table_semantics == "UNRESTRICTED_SUBSIDIARY":
-        return ownership_pct < threshold
-    return ownership_pct >= threshold
+    if direction == "BELOW":
+        return ownership_pct >= threshold
+    if direction == "AT_OR_ABOVE":
+        return ownership_pct >= threshold
+    raise ValueError(f"unsupported direction: {direction}")
 
 
 def _related_parties_from_extract(
@@ -164,11 +177,12 @@ def _related_parties_from_extract(
     table_semantics: str,
     source_kind: str,
 ) -> tuple[list[RelatedParty], list[dict[str, Any]]]:
+    direction = _direction_for_semantics(table_semantics)
     parties: list[RelatedParty] = []
     serialized_rows: list[dict[str, Any]] = []
 
     for row in extracted.ownership_rows:
-        is_related = _row_is_related(row.ownership_pct, threshold, table_semantics)
+        is_related = _row_is_related(row.ownership_pct, threshold, direction)
         page = _source_page_for_quote(pages, row.counterparty_quote)
         provenance = Provenance(
             doc_id=doc_id,
@@ -711,6 +725,7 @@ async def _run_async(work_dir: Path) -> StageResult:
             "doc_id": doc_id,
             "header_account": extracted.header_account,
             "table_semantics": table_semantics,
+            "direction": _direction_for_semantics(table_semantics),
             "table_semantics_source": _serialize_provenance(
                 Provenance(
                     doc_id=doc_id,
@@ -753,6 +768,7 @@ async def _run_async(work_dir: Path) -> StageResult:
             )
             scenario_payloads[scenario_id]["perimeter"] = {
                 "table_semantics": perimeter.table_semantics,
+                "direction": _direction_for_semantics(perimeter.table_semantics),
                 "threshold_pct": _decimal_to_str(peri_threshold),
                 "ownership": peri_rows,
             }

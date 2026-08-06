@@ -5,7 +5,26 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
-from agent.metrics.engine import breaches, compute_covenant_metric, relevant_row_indices
+from agent.metrics.engine import breaches, compute_covenant_metric, relevant_row_indices, _d
+
+
+def _scenario_ledger(ledger: list[dict[str, Any]], scenario_id: str) -> list[dict[str, Any]]:
+    return [row for row in ledger if row.get("scenario_id") == scenario_id]
+
+
+def _evidence_prefix(scenario_id: str) -> str:
+    return f"TXN-{scenario_id}-"
+
+
+def _assert_evidence_prefix(evidence: str | None, scenario_id: str) -> str | None:
+    if evidence is None:
+        return None
+    prefix = _evidence_prefix(scenario_id)
+    if not str(evidence).startswith(prefix):
+        raise ValueError(
+            f"evidence_txn_id {evidence!r} does not start with scenario prefix {prefix!r}",
+        )
+    return evidence
 
 
 def _flipping_txns(
@@ -15,18 +34,23 @@ def _flipping_txns(
     status: str,
     parties: dict[str, Any] | None,
     adjustments: dict[str, Any],
-) -> tuple[list[str], int]:
+) -> tuple[list[str], int, dict[str, Decimal]]:
+    scenario_id = covenant["scenario_id"]
+    scenario_ledger = _scenario_ledger(ledger, scenario_id)
     threshold = Decimal(str(covenant["threshold"]))
     direction = covenant["direction"]
-    indices = relevant_row_indices(covenant, ledger, parties=parties)
+    indices = relevant_row_indices(covenant, scenario_ledger, parties=parties)
     flipping: list[str] = []
+    amounts: dict[str, Decimal] = {}
 
     for index in indices:
-        row = ledger[index]
+        row = scenario_ledger[index]
         txn_id = row.get("txn_id")
         if not txn_id:
             continue
-        reduced = [r for i, r in enumerate(ledger) if i != index]
+        txn_key = str(txn_id)
+        amounts[txn_key] = abs(_d(row.get("amount_usd")))
+        reduced = [r for r in ledger if r.get("txn_id") != txn_id]
         reduced_value = compute_covenant_metric(
             covenant,
             reduced,
@@ -35,23 +59,25 @@ def _flipping_txns(
         )
         reduced_status = "BREACH" if breaches(reduced_value, direction, threshold) else "COMPLIANT"
         if reduced_status != status:
-            flipping.append(str(txn_id))
+            flipping.append(txn_key)
 
-    return flipping, len(indices)
+    return flipping, len(indices), amounts
 
 
 def _pick_evidence(
     flipping: list[str],
     adjusted_txn_ids: set[str],
+    amounts: dict[str, Decimal],
 ) -> tuple[str | None, list[str]]:
-    if len(flipping) == 1:
-        return flipping[0], []
     if len(flipping) == 0:
         return None, []
+    if len(flipping) == 1:
+        return flipping[0], []
     adjusted = [txn for txn in flipping if txn in adjusted_txn_ids]
     if len(adjusted) == 1:
         return adjusted[0], []
-    return None, ["MULTIPLE_FLIPPING_TXNS"]
+    smallest = min(flipping, key=lambda txn: amounts.get(txn, Decimal("Infinity")))
+    return smallest, []
 
 
 def _search_reason(
@@ -85,14 +111,15 @@ def find_evidence(
     if status != "BREACH":
         return None, []
 
-    flipping, _ = _flipping_txns(
+    flipping, _, amounts = _flipping_txns(
         covenant,
         ledger,
         status=status,
         parties=parties,
         adjustments=adjustments,
     )
-    return _pick_evidence(flipping, adjusted_txn_ids)
+    evidence, flags = _pick_evidence(flipping, adjusted_txn_ids, amounts)
+    return _assert_evidence_prefix(evidence, covenant["scenario_id"]), flags
 
 
 def evidence_search(
@@ -116,7 +143,7 @@ def evidence_search(
             "reason": _search_reason(status=status, flipping=[], result=None, flags=[]),
         }
 
-    flipping, candidates = _flipping_txns(
+    flipping, candidates, amounts = _flipping_txns(
         covenant,
         ledger,
         status=status,
@@ -126,8 +153,10 @@ def evidence_search(
     result = evidence_txn_id
     search_flags = list(flags or [])
     if result is None:
-        result, extra_flags = _pick_evidence(flipping, adjusted_txn_ids)
+        result, extra_flags = _pick_evidence(flipping, adjusted_txn_ids, amounts)
         search_flags.extend(extra_flags)
+
+    result = _assert_evidence_prefix(result, covenant["scenario_id"])
 
     return {
         "method": "counterfactual",

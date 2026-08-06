@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -26,6 +27,15 @@ from agent.parsing.numbers import round_half_up
 ZERO = Decimal("0")
 OFF_LEDGER_KIND = "OFF_LEDGER"
 EBITDA_KIND = "EBITDA_ADDBACK"
+
+
+def _is_adjustment_ref(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, float) and math.isnan(value):
+        return False
+    text = str(value).strip()
+    return bool(text) and text.casefold() != "nan"
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -105,7 +115,7 @@ def _adjustments_applied(
         if row.get("scenario_id") != scenario_id:
             continue
         ref = row.get("adjustment_ref")
-        if ref and ref not in seen:
+        if _is_adjustment_ref(ref) and ref not in seen:
             seen.add(str(ref))
             applied.append(str(ref))
     for adj_id, adj in adjustments.items():
@@ -516,6 +526,8 @@ def verify(trace: dict[str, Any], *, work_dir: Path, template: dict[str, Any]) -
             )
 
         for adj_id in computation.get("adjustments_applied") or []:
+            if not _is_adjustment_ref(adj_id):
+                continue
             if adj_id not in adjustments and adj_id not in (
                 trace.get("adjustments") or {}
             ):

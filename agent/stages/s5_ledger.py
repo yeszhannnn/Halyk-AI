@@ -279,6 +279,10 @@ def run(*, work_dir: Path) -> StageResult:
             "original_category",
         ]
     ]
+    output["adjustment_ref"] = output["adjustment_ref"].where(
+        output["adjustment_ref"].notna(),
+        None,
+    )
     parquet_path = work_dir / "05_ledger.parquet"
     con = duckdb.connect()
     try:

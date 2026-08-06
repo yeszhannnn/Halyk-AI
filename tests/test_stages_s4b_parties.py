@@ -30,12 +30,14 @@ def test_unrestricted_subsidiary_threshold() -> None:
     from agent.stages.s4b_parties import _row_is_related
 
     threshold = Decimal("50.0")
-    assert _row_is_related(Decimal("11.4"), threshold, "UNRESTRICTED_SUBSIDIARY")
-    assert not _row_is_related(Decimal("87.6"), threshold, "UNRESTRICTED_SUBSIDIARY")
+    assert not _row_is_related(Decimal("11.4"), threshold, "BELOW")
+    assert _row_is_related(Decimal("87.6"), threshold, "BELOW")
 
 
-def test_relatedness_exact_threshold() -> None:
+def test_related_party_threshold() -> None:
+    from agent.stages.s4b_parties import _row_is_related
+
     threshold = Decimal("35.0")
-    assert Decimal("41.2") >= threshold
-    assert not (Decimal("33.8") >= threshold)
-    assert Decimal("35.0") >= threshold
+    assert _row_is_related(Decimal("41.2"), threshold, "AT_OR_ABOVE")
+    assert not _row_is_related(Decimal("33.8"), threshold, "AT_OR_ABOVE")
+    assert _row_is_related(Decimal("35.0"), threshold, "AT_OR_ABOVE")

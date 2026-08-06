@@ -120,7 +120,7 @@ def _quote_checks(result: CovenantExtract, verification_text: str) -> list[tuple
         ("period", result.period_quote, verification_text),
         ("metric_kind", result.metric.kind_quote, verification_text),
         ("metric_scope", result.metric.scope_quote, verification_text),
-        ("metric_notes", result.metric.notes_quote, verification_text),
+        ("metric_notes", result.notes_quote, verification_text),
         (
             "metric_numerator_include",
             result.metric.numerator.include_keywords_quote,
@@ -194,13 +194,13 @@ def _category_from_extract(spec: CategorySpecExtract) -> CategorySpec:
     )
 
 
-def _metric_from_extract(spec: MetricSpecExtract) -> MetricSpec:
+def _metric_from_extract(spec: MetricSpecExtract, *, notes: str = "") -> MetricSpec:
     return MetricSpec(
         kind=spec.kind.value,
         numerator=_category_from_extract(spec.numerator),
         denominator=_category_from_extract(spec.denominator) if spec.denominator else None,
         scope=spec.scope.value,
-        notes=spec.notes,
+        notes=notes or spec.notes,
     )
 
 
@@ -265,7 +265,7 @@ def _covenant_from_extract(
         direction=extracted.direction.value,
         threshold=extracted.threshold,
         threshold_unit=extracted.threshold_unit.value,
-        metric=_metric_from_extract(extracted.metric),
+        metric=_metric_from_extract(extracted.metric, notes=extracted.notes),
         period=(extracted.period_start, extracted.period_end),
         springing=springing,
         source=_provenance(
