@@ -6,6 +6,8 @@ agent/models.py
 agent/validate.py
 agent/evidence/__init__.py
 agent/llm/__init__.py
+agent/parsing/__init__.py
+agent/parsing/numbers.py
 agent/stages/__init__.py
 agent/stages/s1_ingest.py
 agent/stages/s2_classify.py
@@ -19,3 +21,6 @@ covenant_agent.egg-info/SOURCES.txt
 covenant_agent.egg-info/dependency_links.txt
 covenant_agent.egg-info/requires.txt
 covenant_agent.egg-info/top_level.txt
+tests/test_numbers.py
+tests/test_scoring.py
+tests/test_stages_s1_s2.py
