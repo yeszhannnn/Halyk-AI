@@ -545,6 +545,96 @@ def compute_covenant_metric(
     return numerator / denominator
 
 
+def _explain_row_match(
+    row: dict[str, Any],
+    spec: dict[str, Any],
+    *,
+    parties: dict[str, Any] | None,
+    group_scope: bool = False,
+) -> str:
+    category = _effective_category(row, bool(spec.get("apply_reclass", True)))
+    desc = str(row.get("description") or "")
+    if row.get("synthetic"):
+        ref = row.get("adjustment_ref") or "off_ledger"
+        return f"off_ledger~{ref}"
+    for keyword in spec.get("include_keywords") or []:
+        if _keyword_matches(
+            keyword,
+            row=row,
+            category=category,
+            parties=parties,
+            group_scope=group_scope,
+        ):
+            key = keyword.casefold()
+            if key in desc.casefold():
+                token = desc.strip().split()[0][:24] if desc.strip() else keyword[:24]
+                return f"description~{token.casefold()}"
+            return f"category={category}"
+    return f"category={category}"
+
+
+def collect_covenant_inputs(
+    covenant: dict[str, Any],
+    ledger: list[dict[str, Any]],
+    *,
+    parties: dict[str, Any] | None = None,
+) -> list[dict[str, str]]:
+    """Rows contributing to the covenant metric with categorisation rationale."""
+    period = (_parse_date(covenant["period"][0]), _parse_date(covenant["period"][1]))
+    scenario_id = covenant["scenario_id"]
+    metric = covenant["metric"]
+    scope = metric.get("scope", "BORROWER")
+    inputs: list[dict[str, str]] = []
+    seen: set[str | None] = set()
+
+    for row in ledger:
+        if scope == "BORROWER" and row.get("scenario_id") != scenario_id:
+            continue
+        if row.get("excluded"):
+            continue
+        if not _in_period(row, period):
+            continue
+        amount = _d(row.get("amount_usd"))
+        if amount == ZERO:
+            continue
+
+        matched_spec: dict[str, Any] | None = None
+        group_scope = scope == "GROUP"
+        for spec in (metric["numerator"], metric.get("denominator")):
+            if spec is None:
+                continue
+            if _row_matches_spec(
+                row,
+                spec,
+                period=period,
+                parties=parties,
+                group_scope=group_scope,
+            ):
+                matched_spec = spec
+                break
+        if matched_spec is None:
+            continue
+
+        key = row.get("txn_id") or row.get("adjustment_ref")
+        if key in seen:
+            continue
+        seen.add(key)
+        inputs.append(
+            {
+                "txn_id": str(row.get("txn_id") or f"SYN-{row.get('adjustment_ref')}"),
+                "amount_usd": str(amount),
+                "category": _effective_category(row, bool(matched_spec.get("apply_reclass", True))),
+                "why": _explain_row_match(
+                    row,
+                    matched_spec,
+                    parties=parties,
+                    group_scope=group_scope,
+                ),
+            }
+        )
+    return inputs
+
+
 def relevant_row_indices(
     covenant: dict[str, Any],
     ledger: list[dict[str, Any]],

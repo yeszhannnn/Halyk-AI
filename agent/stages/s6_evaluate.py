@@ -144,19 +144,6 @@ def _evaluate_cell(
     }
 
 
-def _submission_from_findings(findings: list[dict[str, Any]]) -> dict[str, Any]:
-    answers: dict[str, dict[str, dict[str, Any]]] = {}
-    for finding in findings:
-        scenario_id = finding["scenario_id"]
-        slot = finding["slot"]
-        answers.setdefault(scenario_id, {})[slot] = {
-            "status": finding["status"],
-            "actual": float(finding["rounded"]),
-            "evidence_txn_id": finding["evidence_txn_id"],
-        }
-    return {"team": "local", "contact_email": "", "model": "covenant-agent", "answers": answers}
-
-
 def run(*, work_dir: Path) -> StageResult:
     covenants_payload = _load_json(work_dir / "04a_covenants.json")
     parties_payload = _load_json(work_dir / "04b_parties.json")
@@ -188,12 +175,6 @@ def run(*, work_dir: Path) -> StageResult:
     }
     (work_dir / "06_evaluated.json").write_text(
         json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-
-    submission = _submission_from_findings(findings)
-    (work_dir / "submission.json").write_text(
-        json.dumps(submission, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
 

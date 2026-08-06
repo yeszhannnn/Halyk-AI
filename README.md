@@ -1,4 +1,4 @@
-# Covenant Agent
+# Halyk AI covenant agent
 
 ![Python](https://img.shields.io/badge/python-3.11-blue.svg)
 ![Deterministic](https://img.shields.io/badge/inference-temperature%200-informational)

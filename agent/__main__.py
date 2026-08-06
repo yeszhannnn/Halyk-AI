@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from agent.config import DEADLINE, MODEL_ID, TEMPERATURE
+from agent.degrade import apply_degradation_ladder
 from agent.stages import StageResult
 from agent.stages import s1_ingest, s2_classify, s3_bind, s4_extract, s5_ledger, s6_evaluate, s7_emit
 
@@ -50,7 +51,15 @@ def _git_sha() -> str | None:
     return result.stdout.strip()
 
 
-def _write_manifest(work_dir: Path, *, input_dir: Path, output_path: Path) -> None:
+def _write_manifest(
+    work_dir: Path,
+    *,
+    input_dir: Path,
+    output_path: Path,
+    mode: str,
+    started_at: str,
+    stages: dict[str, dict[str, int | str | None]],
+) -> None:
     manifest = {
         "git_sha": _git_sha(),
         "model_id": MODEL_ID,
@@ -58,8 +67,9 @@ def _write_manifest(work_dir: Path, *, input_dir: Path, output_path: Path) -> No
         "input_dir": str(input_dir),
         "output_path": str(output_path),
         "deadline": DEADLINE.isoformat(),
-        "started_at": datetime.now(timezone.utc).isoformat(),
-        "stages": {},
+        "started_at": started_at,
+        "mode": mode,
+        "stages": stages,
     }
     (work_dir / "00_manifest.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
@@ -79,6 +89,19 @@ def _log_stage(stage_name: str, elapsed_ms: int, result: StageResult) -> None:
 def _past_deadline() -> bool:
     now = datetime.now(DEADLINE.tzinfo)
     return now >= DEADLINE
+
+
+def _run_stage(spec: StageSpec, *, input_dir: Path, work_dir: Path, output_path: Path, mode: str, started_at: str) -> StageResult:
+    if spec.name == "s1_ingest":
+        return spec.run(input_dir=input_dir, work_dir=work_dir)
+    if spec.name == "s7_emit":
+        return spec.run(
+            work_dir=work_dir,
+            output_path=output_path,
+            mode=mode,
+            started_at=started_at,
+        )
+    return spec.run(work_dir=work_dir)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -110,10 +133,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"error: input directory not found: {input_dir}", file=sys.stderr)
         return 1
 
-    _write_manifest(work_dir, input_dir=input_dir, output_path=output_path)
+    started_at = datetime.now(timezone.utc).isoformat()
+    mode = "full"
+    stage_timings: dict[str, dict[str, int | str | None]] = {}
 
     for spec in STAGES:
         if _past_deadline():
+            mode = "degraded"
             print(
                 f"deadline reached ({DEADLINE.isoformat()}); stopping before {spec.name}",
                 file=sys.stderr,
@@ -126,12 +152,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         started = time.perf_counter()
         try:
-            if spec.name == "s1_ingest":
-                result = spec.run(input_dir=input_dir, work_dir=work_dir)
-            elif spec.name == "s7_emit":
-                result = spec.run(work_dir=work_dir, output_path=output_path)
-            else:
-                result = spec.run(work_dir=work_dir)
+            result = _run_stage(
+                spec,
+                input_dir=input_dir,
+                work_dir=work_dir,
+                output_path=output_path,
+                mode=mode,
+                started_at=started_at,
+            )
         except NotImplementedError as exc:
             elapsed_ms = int((time.perf_counter() - started) * 1000)
             print(f"{spec.name}: failed after {elapsed_ms}ms", file=sys.stderr)
@@ -139,7 +167,47 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 1
 
         elapsed_ms = int((time.perf_counter() - started) * 1000)
+        stage_timings[spec.name] = {
+            "elapsed_ms": elapsed_ms,
+            "items": result.item_count,
+            "rows": result.row_count,
+        }
         _log_stage(spec.name, elapsed_ms, result)
+
+    if mode == "degraded":
+        apply_degradation_ladder(work_dir)
+        if not args.force and (work_dir / "trace.json").exists():
+            print("s7_emit: skipped (outputs exist)")
+        else:
+            started = time.perf_counter()
+            try:
+                result = s7_emit.run(
+                    work_dir=work_dir,
+                    output_path=output_path,
+                    mode=mode,
+                    started_at=started_at,
+                )
+            except Exception as exc:  # noqa: BLE001 — surface emit failures clearly
+                elapsed_ms = int((time.perf_counter() - started) * 1000)
+                print(f"s7_emit: failed after {elapsed_ms}ms", file=sys.stderr)
+                print(str(exc), file=sys.stderr)
+                return 1
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            stage_timings["s7_emit"] = {
+                "elapsed_ms": elapsed_ms,
+                "items": result.item_count,
+                "rows": result.row_count,
+            }
+            _log_stage("s7_emit", elapsed_ms, result)
+
+    _write_manifest(
+        work_dir,
+        input_dir=input_dir,
+        output_path=output_path,
+        mode=mode,
+        started_at=started_at,
+        stages=stage_timings,
+    )
 
     return 0
 
