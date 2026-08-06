@@ -20,6 +20,7 @@ BUDGET_USD = Decimal(os.getenv("BUDGET_USD", "50.00"))
 
 MODEL_ID = os.getenv("OPENAI_MODEL", "gpt-4o")
 TEMPERATURE = 0
+OPENAI_SEED = int(os.getenv("OPENAI_SEED", "42"))
 
 ARTIFACTS = (
     "00_manifest.json",
