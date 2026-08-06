@@ -1,0 +1,409 @@
+Keywords: ['EBITDA', 'Арендные и Коммунальные расходы', 'Выручка', 'Выручка за вычетом Операционных расходов', 'Капитальные затраты', 'Коммунальные расходы', 'Коммунальных расходов', 'Налоги', 'Ограниченной', 'Ограниченные платежи', 'Ограниченные платежи в пользу аффилированных лиц', 'Операционных расходов', 'Процентные расходы', 'Расходов на оплату труда', 'Скорректированная EBITDA', 'Страховые премии', 'арендных платежей', 'аффилированные лица', 'аффилированных и связанных сторон', 'всех расходов на оплату труда', 'выручка', 'выручки', 'капитальные активы, переданные Неограниченным дочерним организациям', 'капитальные затраты', 'наибольшей из величин Расходов на оплату труда и Налогов', 'операционных и капитальных затрат', 'операционных расходов', 'передавать', 'переклассифицированные аудиторами', 'перечислять', 'платежей в пользу связанных сторон', 'платежи', 'поступлений по финансированию', 'поступления по финансированию', 'предоставлять', 'прямо согласованных Кредитором в письменной форме', 'расходы на коммунальные услуги', 'расходы на оплату труда', 'связанные стороны', 'совокупного обязательства Заёмщика по любой программе выходных пособий, сокращения или удержания персонала', 'совокупные капитальные затраты Заёмщика', 'совокупных капитальных затрат', 'финансовых или иных неоперационных статей']
+
+=== P1 (56 rows) ===
+  TXN-P1-0007 -11065870.19 USD Plant and boiler insurance premium — Taraz site 2025
+  TXN-P1-0012  -1604249.66 USD Payroll for laboratory staff — April 2025
+  TXN-P1-0002  -1474435.73 USD Telecom leased line — Kostanay centre, February 2025
+  TXN-P1-0032   -654151.88 USD Default interest charge — Almaty office, instalment 1 2025
+  TXN-P1-0037   -6453942.7 USD Interest on trade facility — Atyrau terminal, November 2025
+  TXN-P1-0026  -1585834.81 USD Standby generator electricity — Pavlodar block
+  TXN-P1-0041    -315103.3 USD Electricity network capacity charge — Uralsk annex, instalment 3
+  TXN-P1-0025   -214382.05 USD Sponsorship marketing of regional sports club 2025
+  TXN-P1-0050 -10611759.48 USD Payroll for night shift — Q1
+  TXN-P1-0052   -379368.05 USD Digital media buy — search — Karaganda yard, instalment 3 2025
+  TXN-P1-0014   -918443.27 USD Terminal land lease payments 2025
+  TXN-P1-0028   3575522.74 USD Utility deposit returned — Almaty office, period 02
+  TXN-P1-0047  -2697744.03 USD Environmental liability insurance — Uralsk annex, instalment 2 2025
+  TXN-P1-0022   -593594.68 USD Municipal tax levy — instalment 2 2025
+  TXN-P1-0038   7831364.09 USD Water charge adjustment credit
+  TXN-P1-0020   3066637.42 USD Payroll advance recovered from staff
+  TXN-P1-0006   3045764.68 USD VAT refund received — Oskemen unit, June 2025
+  TXN-P1-0049    289816.92 EUR Utility rebate received — Oskemen unit, January 2025
+  TXN-P1-0034   -798220.24 USD Workers comp insurance — September 2025
+  TXN-P1-0009   5085393.95 USD Payroll clearing account sweep back — Ekibastuz block B 2025
+  TXN-P1-0015  -1648814.64 USD Interest on bilateral facility — Kyzylorda station, November 2025
+  TXN-P1-0003   -237578.58 USD Default interest charge — Kyzylorda station
+  TXN-P1-0054  -9798966.39 USD Vehicle tax payment — Ekibastuz block B
+  TXN-P1-0055   -9623763.9 USD Trade press marketing insertion
+  TXN-P1-0023 -16437674.68 USD Quarterly estimated tax — Kyzylorda station 2025
+  TXN-P1-0035   2149964.79 USD Water charge adjustment credit — Kyzylorda station, final call 2025
+  TXN-P1-0010  -1842006.44 USD Purchase of quayside crane equipment
+  TXN-P1-0033   -367648.64 USD Cyber insurance premium — period 02 2025
+  TXN-P1-0021   -715630.22 USD Payroll for administrative staff — Aktobe hub 2025
+  TXN-P1-0024   -360127.31 USD Regional marketing campaign production — Pavlodar block
+  TXN-P1-0036   -428818.65 USD Trade press marketing insertion — Semey base, Q1
+  TXN-P1-0042  -3104882.61 USD Berth servicing and operating costs 2025
+  TXN-P1-0044  -5732393.39 USD Revolver interest — Zhezkazgan compound, August 2025
+  TXN-P1-0056  -6407989.14 USD Industry exhibition stand marketing — Turkistan point
+  TXN-P1-0031   -283664.18 USD Management advisory retainer
+  TXN-P1-0048  -6335501.35 USD Excise tax payment 2025
+  TXN-P1-0053  -2554455.78 USD Electricity for pumping station 2025
+  TXN-P1-0040  -4159259.63 USD Motor third-party insurance 2025
+  TXN-P1-0045   -612884.19 USD Quay wall inspection and survey servicing contract
+  TXN-P1-0019   -2010790.3 USD Term loan interest — Uralsk annex 2025
+  TXN-P1-0046   3054795.52 USD Unearned insurance premium return — February 2025
+  TXN-P1-0013   -986275.52 USD Corporate income tax instalment — June
+  TXN-P1-0016  -5004933.43 USD Payroll bonus disbursement — Almaty office 2025
+  TXN-P1-0030   6842117.53 USD Port handling and stevedoring sales settlement 2025
+  TXN-P1-0017    577364.91 USD Telecom service credit received 2025
+  TXN-P1-0001  -5137567.61 USD Franchise tax filing — Astana branch
+  TXN-P1-0008    338758.87 USD Payroll clearing account sweep back — Uralsk annex
+  TXN-P1-0029  -2970109.83 USD Interest on finance sublease — Pavlodar block
+  TXN-P1-0004  -9801187.71 USD Quarterly interest coupon — Semey base, Q3
+  TXN-P1-0005  -1352784.37 EUR Tax penalty settlement charge — Atyrau terminal, Q1 2025
+  TXN-P1-0043    -76611.78 USD Industry exhibition stand marketing — period 03 2025
+  TXN-P1-0039  -1096125.15 USD Compressed air utility charge — May
+  TXN-P1-0027    -82098.81 USD Electricity for pumping station — Kostanay centre
+  TXN-P1-0018  -4731226.36 EUR Advance profit tax instalment — Kostanay centre
+  TXN-P1-0011    2224775.3 USD Media buy rate adjustment credit
+  TXN-P1-0051  -1507081.12 USD Waste water charge — Aktobe hub, October 2025
+
+=== P2 (56 rows) ===
+  TXN-P2-0006  -2125991.67 USD Property tax payment — Oskemen unit
+  TXN-P2-0017  -3249662.49 USD Printed marketing collateral run — Uralsk annex, January 2025
+  TXN-P2-0019  -1143345.59 USD Overdraft interest — Kyzylorda station, September 2025
+  TXN-P2-0030  -1054367.22 USD Office rent — period 02
+  TXN-P2-0008   -302754.71 EUR Customer newsletter marketing production — Zhezkazgan compound 2025
+  TXN-P2-0037   5814535.19 USD VAT refund received — Turkistan point, April
+  TXN-P2-0028   4882117.46 USD Term loan facility drawdown for cold store expansion
+  TXN-P2-0056    485636.32 USD Media buy rate adjustment credit — Kyzylorda station, November
+  TXN-P2-0021 -11913971.27 USD Parking garage lease — Kostanay centre 2025
+  TXN-P2-0055   7382549.74 USD Marketing co-operative funding received — June 2025
+  TXN-P2-0002   -421881.82 USD Electricity network capacity charge — November
+  TXN-P2-0039    803966.93 USD Rent overpayment refunded — Kyzylorda station, January 2025
+  TXN-P2-0022   2083129.43 USD Interest credited on current account — Kostanay centre 2025
+  TXN-P2-0033  -2212134.41 USD Municipal tax levy — Almaty office, Q1
+  TXN-P2-0035  -2241407.97 USD Warehouse contents insurance — Kostanay centre, November 2025
+  TXN-P2-0036  -3204881.55 USD Purchase of blast freezer equipment
+  TXN-P2-0053   2003454.47 USD Marketing volume rebate — Semey base, April
+  TXN-P2-0025   -2709060.2 USD Sponsorship marketing of regional sports club — Kostanay centre, instalment 2
+  TXN-P2-0052 -11545820.91 USD Quarterly interest coupon — Karaganda yard, Q1 2025
+  TXN-P2-0010  -2085018.52 USD Water supply charge — October
+  TXN-P2-0054   -248898.41 USD Auto fleet insurance — Almaty office 2025
+  TXN-P2-0014  -2708057.37 USD Equipment yard lease — Kyzylorda station, instalment 2 2025
+  TXN-P2-0023   -211784.77 USD Rooftop lease — Almaty office, October 2025
+  TXN-P2-0032    -418971.2 USD Equipment yard lease — Turkistan point, May 2025
+  TXN-P2-0046    617744.38 USD Payroll agency rebate — Aktobe hub 2025
+  TXN-P2-0009  -5918004.37 USD Cold store servicing and operating costs 2025
+  TXN-P2-0038   1406628.57 USD Payroll advance recovered from staff — October 2025
+  TXN-P2-0040  -1104663.28 USD Advisory engagement on depot operations
+  TXN-P2-0024  -2530653.81 USD Telecom services — Uralsk annex 2025
+  TXN-P2-0011 -10753717.14 USD Radio ad campaign schedule — Uralsk annex, Q3
+  TXN-P2-0045   -296053.42 USD Withholding tax remittance — Kyzylorda station, February 2025
+  TXN-P2-0027  -3128248.17 USD Marketing research panel subscription — December 2025
+  TXN-P2-0004    -364089.3 USD Default interest charge — Shymkent depot, May
+  TXN-P2-0047   -434092.69 USD Environmental emissions tax — H2
+  TXN-P2-0012   -271884.36 USD Management advisory retainer
+  TXN-P2-0042    411214.48 USD Group insurance experience refund — H1
+  TXN-P2-0043   -2065898.1 USD Parking garage lease — Pavlodar block, Q1
+  TXN-P2-0031  -6057047.46 USD Excise tax payment — Shymkent depot, final call 2025
+  TXN-P2-0007   5043155.21 USD Interest recovery on overpayment — Astana branch 2025
+  TXN-P2-0020  -7734227.11 USD Digital media buy — search — Pavlodar block, December
+  TXN-P2-0029    -500159.9 USD Overdraft interest — Oskemen unit 2025
+  TXN-P2-0034   7214663.82 USD Refrigerated distribution sales settlement 2025
+  TXN-P2-0016  -1406217.85 USD District heating utility charge — Astana branch, Q4
+  TXN-P2-0001   -838159.45 USD Property insurance premium — Uralsk annex, instalment 3
+  TXN-P2-0018 -11088144.33 USD Compressed air utility charge — period 01
+  TXN-P2-0050   -853285.29 USD Payroll funding transfer — Kostanay centre 2025
+  TXN-P2-0049   -2189336.3 USD Interest on export credit line — Kostanay centre, August
+  TXN-P2-0005  12986601.59 USD Interest recovery on overpayment — Atyrau terminal, December 2025
+  TXN-P2-0041  -2278643.59 USD Franchise tax filing — October 2025
+  TXN-P2-0051   -395108.58 USD Telecom mobile fleet plan — Atyrau terminal 2025
+  TXN-P2-0015  -5744675.93 USD Use tax payment — Karaganda yard, Q4 2025
+  TXN-P2-0013  -2152472.71 USD Radio ad campaign schedule — Semey base, final call
+  TXN-P2-0003 -10988013.78 USD Radio ad campaign schedule — October
+  TXN-P2-0026   2163185.04 USD Payroll overfunding returned — December 2025
+  TXN-P2-0044  -1333221.39 USD Interest true-up charge — Almaty office, February 2025
+  TXN-P2-0048   -245067.17 USD Tax penalty settlement charge 2025
+
+=== P3 (55 rows) ===
+  TXN-P3-0053   1209157.56 USD Rent free period credit — Turkistan point, June
+  TXN-P3-0041   1064153.42 USD Group insurance experience refund — Oskemen unit
+  TXN-P3-0023 -10504386.24 USD Seasonal payroll run — Taraz site, June 2025
+  TXN-P3-0045  -5075771.04 USD Utility metering charge — Oskemen unit
+  TXN-P3-0032  -2846486.78 USD Storage unit rent — Atyrau terminal 2025
+  TXN-P3-0040   -366905.32 USD Payroll top-up transfer — Shymkent depot, October
+  TXN-P3-0007  -3024115.38 USD Warehouse contents insurance — Atyrau terminal 2025
+  TXN-P3-0051 -10938732.68 USD Bi-weekly payroll run — Kyzylorda station, November 2025
+  TXN-P3-0035   -193979.88 USD Environmental emissions tax — Uralsk annex, March
+  TXN-P3-0002   5442118.93 USD Term loan facility drawdown for turnaround works
+  TXN-P3-0042  -1150561.42 USD Rent for archive premises — period 01
+  TXN-P3-0039   -421727.66 USD Use tax payment — Pavlodar block 2025
+  TXN-P3-0003  -2169716.95 USD Payroll for administrative staff — Kostanay centre, period 02
+  TXN-P3-0055   -581776.66 USD VAT instalment — March
+  TXN-P3-0024   -612884.25 EUR Catalyst regeneration servicing contract
+  TXN-P3-0033  10156687.58 USD Interest income on treasury bills — instalment 3 2025
+  TXN-P3-0005   -383631.48 USD Municipal water charge — Oskemen unit, period 03
+  TXN-P3-0052    -228635.3 USD Corporate brand marketing programme — Ekibastuz block B, March
+  TXN-P3-0046   2729387.09 USD Utility rebate received — Ekibastuz block B, Q4 2025
+  TXN-P3-0026  -1755396.91 USD Outdoor marketing site hire — October 2025
+  TXN-P3-0014   -786416.28 USD Tax audit assessment payment — Ekibastuz block B 2025
+  TXN-P3-0029  -3728972.76 USD Digital media buy — search — September
+  TXN-P3-0028  -4218006.51 USD Plant servicing and operating costs 2025
+  TXN-P3-0020   1625020.42 USD Property tax rebate — Uralsk annex, Q3 2025
+  TXN-P3-0050  -2189408.24 USD Cold store lease — July 2025
+  TXN-P3-0016   1644942.02 USD Insurance claim reimbursement — Shymkent depot 2025
+  TXN-P3-0017  -2596172.03 USD Utility metering charge — Aktobe hub
+  TXN-P3-0011  -4276964.85 USD Corporate income tax instalment — Oskemen unit, May 2025
+  TXN-P3-0031  -8490398.35 USD Point-of-sale marketing materials — Karaganda yard
+  TXN-P3-0038  -4413158.15 USD Payroll accrual funding — Uralsk annex, June 2025
+  TXN-P3-0001   -264117.82 USD Management advisory retainer
+  TXN-P3-0054  -5578735.29 USD Ground lease instalment — Turkistan point 2025
+  TXN-P3-0043   1999985.81 USD Lease incentive received — June
+  TXN-P3-0009  -6836857.12 USD Interest on finance sublease — Kyzylorda station, Q3
+  TXN-P3-0010   8104772.36 USD Refinery turnaround services sales settlement 2025
+  TXN-P3-0019  -8962583.42 USD Political risk insurance — Kyzylorda station
+  TXN-P3-0018   2503692.36 USD Interest rebate on early repayment — Turkistan point, October 2025
+  TXN-P3-0012   -211861.67 USD Marine cargo insurance premium — Shymkent depot 2025
+  TXN-P3-0047  -8776423.17 USD Marketing translation and localisation — Oskemen unit
+  TXN-P3-0006   5618786.64 USD Excise tax credit received — instalment 1
+  TXN-P3-0015   -214847.98 USD Capitalised interest charge — Aktobe hub, period 02 2025
+  TXN-P3-0025  -7000023.62 USD Industry exhibition stand marketing — instalment 3
+  TXN-P3-0037   -308379.19 USD Marketing translation and localisation — Q4
+  TXN-P3-0013    712948.55 USD Marketing co-operative funding received — Atyrau terminal
+  TXN-P3-0036    167405.83 USD Electricity overbilling refund — Q3 2025
+  TXN-P3-0021   8777310.89 USD Utility deposit returned — Uralsk annex, instalment 2
+  TXN-P3-0049   -708761.82 USD Electricity for pumping station — May 2025
+  TXN-P3-0034  -9958958.72 USD Liability insurance — Atyrau terminal 2025
+  TXN-P3-0027   -238441.92 USD Marketing research panel subscription 2025
+  TXN-P3-0008   -731378.19 USD Directors and officers insurance — Atyrau terminal, August
+  TXN-P3-0030 -13690215.11 USD Radio ad campaign schedule — Oskemen unit
+  TXN-P3-0048  -1802146.12 USD Corporate brand marketing programme — Oskemen unit, March
+  TXN-P3-0004   -607809.53 USD Advance profit tax instalment — Turkistan point, H2
+  TXN-P3-0022   -408073.64 USD Revolver interest — Astana branch 2025
+  TXN-P3-0044  -3331769.29 USD Revolver interest — instalment 2 2025
+
+=== P4 (57 rows) ===
+  TXN-P4-0056  -2019970.78 USD Revolver interest — November
+  TXN-P4-0013  -6073547.09 USD Outdoor marketing site hire — Kyzylorda station
+  TXN-P4-0018   -2356896.7 USD Warehouse lease — Semey base, June 2025
+  TXN-P4-0038    459637.57 USD Telecom service credit received — Taraz site 2025
+  TXN-P4-0029   -2540625.5 USD Depot yard rent — July 2025
+  TXN-P4-0031   -716503.49 USD Marketing research panel subscription — period 04 2025
+  TXN-P4-0030   -258858.22 USD Land tax instalment — Almaty office, H1 2025
+  TXN-P4-0039   2013671.07 USD Interest on escrow balance 2025
+  TXN-P4-0034   -507883.52 USD Rent for spare parts store — Oskemen unit, H2 2025
+  TXN-P4-0036   -476301.74 USD Interest on subordinated notes — May
+  TXN-P4-0007   2325457.12 USD Excise tax credit received — Uralsk annex, Q1
+  TXN-P4-0053  -1652704.31 USD Purchase of grain conveyor equipment
+  TXN-P4-0015   1113342.05 USD Telecom service credit received — Pavlodar block 2025
+  TXN-P4-0050   -256282.03 USD Payroll for administrative staff — Q3
+  TXN-P4-0054  -4431662.19 USD Terminal servicing and operating costs 2025
+  TXN-P4-0010  -5441959.99 USD Rent for regional office — November 2025
+  TXN-P4-0055   -130150.18 USD Corporate income tax instalment — January
+  TXN-P4-0019   -1200898.7 USD Telecom mobile fleet plan — Aktobe hub, Q1 2025
+  TXN-P4-0033   -534014.43 USD Municipal tax levy — Q4
+  TXN-P4-0006  -2162141.22 USD Quarterly estimated tax — Kyzylorda station 2025
+  TXN-P4-0040   8624275.06 USD Insurance broker rebate — Almaty office, H1 2025
+  TXN-P4-0041   -282672.77 USD Contractor payroll batch — Semey base, instalment 2 2025
+  TXN-P4-0025   -481247.63 USD Flood remediation and silo repair works
+  TXN-P4-0045  -1391968.36 USD Revolver interest — Ekibastuz block B, instalment 2
+  TXN-P4-0004   -386521.16 USD Trade press marketing insertion — Almaty office, Q2 2025
+  TXN-P4-0022 -13147917.01 USD Hourly staff payroll — Shymkent depot
+  TXN-P4-0024   -329065.77 USD VAT instalment — Uralsk annex, Q4 2025
+  TXN-P4-0003  -1197501.59 USD Telecom mobile fleet plan — Taraz site, January 2025
+  TXN-P4-0035    9095881.9 USD Insurance broker rebate — Atyrau terminal
+  TXN-P4-0008  -1089098.65 USD Property insurance premium — Zhezkazgan compound, period 04
+  TXN-P4-0009   -1450062.9 USD Radio ad campaign schedule — October
+  TXN-P4-0001   -251338.94 USD Berth silt cleaning and clearance works
+  TXN-P4-0027   -175317.45 USD Rent for training centre — December
+  TXN-P4-0057   -451994.51 USD Interest on trade facility — Kostanay centre, instalment 1 2025
+  TXN-P4-0044   -173405.98 USD Printed marketing collateral run — H2 2025
+  TXN-P4-0026   -712038.74 USD Environmental emissions tax — August 2025
+  TXN-P4-0049  -6859157.98 USD Franchise tax filing — Karaganda yard, instalment 1 2025
+  TXN-P4-0047   1186007.46 USD Group insurance experience refund — Semey base
+  TXN-P4-0051    103086.37 USD Insurance claim reimbursement — Zhezkazgan compound, March
+  TXN-P4-0023   -342905.28 USD Demurrage dispute arbitration and legal servicing
+  TXN-P4-0046  -9371640.53 USD Rent for archive premises — Ekibastuz block B
+  TXN-P4-0014   -399050.15 USD Capitalised interest charge 2025
+  TXN-P4-0005   10831373.9 USD Payroll advance recovered from staff — instalment 2
+  TXN-P4-0016   -1401514.8 USD Social tax remittance — instalment 2 2025
+  TXN-P4-0042   -541385.27 USD Customer newsletter marketing production — Semey base, February
+  TXN-P4-0020  -3763541.02 USD Payroll for security detail
+  TXN-P4-0002   -429843.42 USD Travel insurance for staff — April
+  TXN-P4-0017  -1100235.57 USD Professional indemnity insurance — H1
+  TXN-P4-0043   7004318.47 USD Grain terminal throughput sales settlement 2025
+  TXN-P4-0037    1702959.3 USD Tax overpayment refunded — Zhezkazgan compound, February 2025
+  TXN-P4-0028  -5210092.53 USD Marketing photography and artwork — Taraz site, May 2025
+  TXN-P4-0012   -207247.26 USD Auto fleet insurance — Turkistan point, period 01
+  TXN-P4-0048   -288417.52 USD Management advisory retainer
+  TXN-P4-0032   9841998.95 USD Insurance deductible recovery — H1
+  TXN-P4-0052  -1099617.09 USD Parking garage lease — Ekibastuz block B, period 04
+  TXN-P4-0021   -211891.24 USD Product launch ad campaign — Kyzylorda station, May 2025
+  TXN-P4-0011   8005272.76 USD Tax assessment reversal — Karaganda yard, June 2025
+
+=== B1 (57 rows) ===
+  TXN-B1-0019   -212472.44 USD Sponsorship marketing of regional sports club — Astana branch
+  TXN-B1-0034  -7012825.84 USD Corporate income tax instalment — Kostanay centre
+  TXN-B1-0048  -5414655.83 USD Equipment yard lease — Pavlodar block, Q4 2025
+  TXN-B1-0027   1751470.75 USD Excise tax credit received — instalment 3 2025
+  TXN-B1-0056   -417312.75 USD Rent for training centre 2025
+  TXN-B1-0046   -462598.24 USD Vehicle livery marketing application — Pavlodar block, September
+  TXN-B1-0049  -6840662.36 USD Marine cargo insurance premium — Aktobe hub
+  TXN-B1-0054  -1099515.55 USD Environmental liability insurance — Pavlodar block
+  TXN-B1-0015  -6029826.75 USD Motor third-party insurance — February
+  TXN-B1-0042    -221738.1 USD Industry exhibition stand marketing — period 03 2025
+  TXN-B1-0031  -1463827.85 USD Social tax remittance — Pavlodar block
+  TXN-B1-0022     832732.8 USD Unused ad campaign budget returned — Astana branch, April 2025
+  TXN-B1-0002   7123935.64 USD Rent deposit returned 2025
+  TXN-B1-0011   1888842.15 USD Rent overpayment refunded — Kostanay centre 2025
+  TXN-B1-0006  -2819887.45 USD Point-of-sale marketing materials — Semey base, June
+  TXN-B1-0040   -274731.84 USD Rent for regional office — instalment 1 2025
+  TXN-B1-0021  -1292105.71 USD Digital media buy — display — Shymkent depot, Q2 2025
+  TXN-B1-0041   -544568.74 USD Workers comp insurance — Shymkent depot 2025
+  TXN-B1-0036    275823.54 USD Excise tax credit received — period 02 2025
+  TXN-B1-0001   1656712.15 USD Sublet rent received — February
+  TXN-B1-0017   4465117.37 USD Insurance premium refund — Uralsk annex
+  TXN-B1-0013   -438406.28 USD Point-of-sale marketing materials — Atyrau terminal, July 2025
+  TXN-B1-0007  -4274240.02 USD Regional marketing campaign production — Almaty office
+  TXN-B1-0018  -1832832.89 USD Depot yard rent — Pavlodar block
+  TXN-B1-0047 -13167834.89 USD Depot yard rent — H1 2025
+  TXN-B1-0029  -1083896.21 USD Point-of-sale marketing materials — Ekibastuz block B, instalment 1
+  TXN-B1-0020    -592296.1 USD Advisory engagement on tariff structuring
+  TXN-B1-0008   -543539.55 USD Withholding tax remittance 2025
+  TXN-B1-0005   -791398.17 USD Franchise tax filing — Kyzylorda station, May
+  TXN-B1-0037  -4540095.35 USD Rent for training centre — Almaty office, August
+  TXN-B1-0016  -1950365.39 USD Excise tax remittance — Q1
+  TXN-B1-0044    208288.37 USD Lease incentive received — Astana branch, September 2025
+  TXN-B1-0035  -9975348.37 USD Warehouse contents insurance — Almaty office
+  TXN-B1-0023  -6166592.66 USD Plant operating and maintenance expenses
+  TXN-B1-0045   1941069.25 USD Marketing overbilling refund — November
+  TXN-B1-0033  -1540833.29 USD Loan interest payment second quarter
+  TXN-B1-0025   7126963.03 USD Marketing co-operative funding received — H1 2025
+  TXN-B1-0038   1176366.08 EUR Tax assessment reversal — October
+  TXN-B1-0010  -1411145.48 USD Antenna mast lease — Pavlodar block, Q2 2025
+  TXN-B1-0053   2448170.56 USD Lease deposit released — Oskemen unit, instalment 2
+  TXN-B1-0052     317985.3 USD Rent overpayment refunded — February
+  TXN-B1-0009   -777155.65 USD Advance profit tax instalment — Shymkent depot, instalment 1 2025
+  TXN-B1-0030   -307018.08 USD Management advisory retainer
+  TXN-B1-0003   -674063.75 USD Motor third-party insurance — February 2025
+  TXN-B1-0051   4465315.58 USD Tax overpayment refunded — Uralsk annex, instalment 3
+  TXN-B1-0032  -7683788.65 USD Industry exhibition stand marketing — Q1 2025
+  TXN-B1-0012   -421686.32 USD Customer newsletter marketing production
+  TXN-B1-0026   9741934.78 USD Generation capacity sales settlement 2025
+  TXN-B1-0050  -7037702.39 EUR Business interruption insurance — Aktobe hub, period 01
+  TXN-B1-0057  -8561654.27 USD Warehouse lease — Oskemen unit
+  TXN-B1-0014   -937215.88 USD Electricity supply charges for the plant 2025
+  TXN-B1-0039   4875575.45 USD Property tax rebate — Zhezkazgan compound, November 2025
+  TXN-B1-0028   -150143.68 USD Marketing photography and artwork — Almaty office, final call
+  TXN-B1-0055  -4643753.93 USD Retail unit rent — Zhezkazgan compound 2025
+  TXN-B1-0043   -602698.98 USD Tax audit assessment payment — period 03
+  TXN-B1-0004  -1284663.42 USD Payroll settlement for operational staff 2025
+  TXN-B1-0024   -379295.13 USD Product launch ad campaign — Turkistan point 2025
+
+=== P8 (55 rows) ===
+  TXN-P8-0007   6830284.13 USD Marketing co-operative funding received — Astana branch 2025
+  TXN-P8-0001  -1435608.42 USD Rent for spare parts store — Zhezkazgan compound 2025
+  TXN-P8-0012   2667830.89 USD Interest credited on current account — Semey base, February
+  TXN-P8-0004   -520395.97 USD Telecom services — Zhezkazgan compound, Q3
+  TXN-P8-0005  -2418663.27 USD Field crew payroll disbursement 2025
+  TXN-P8-0024  -5908411.58 USD District heating utility charge 2025
+  TXN-P8-0002   -472953.75 USD Advance profit tax instalment — Kyzylorda station
+  TXN-P8-0050  -6295087.15 USD Default interest charge — Oskemen unit, Q1
+  TXN-P8-0038   3505589.65 USD Rent deposit returned — Astana branch, January 2025
+  TXN-P8-0020   1885336.06 USD Interest income on term deposit — Shymkent depot 2025
+  TXN-P8-0013   3031930.94 USD Marketing overbilling refund — period 04
+  TXN-P8-0023    1670416.5 USD VAT refund received — December
+  TXN-P8-0008 -14664945.37 USD Excise tax payment — December
+  TXN-P8-0055   -412328.26 USD Office rent — Shymkent depot
+  TXN-P8-0021   -656000.44 USD Interest on export credit line — Kyzylorda station
+  TXN-P8-0006  -14750061.5 USD Travel insurance for staff — Astana branch, instalment 2
+  TXN-P8-0028  -2203370.15 USD Natural gas utility — Shymkent depot, March
+  TXN-P8-0017   -2389464.2 USD Environmental emissions tax — Astana branch, H2
+  TXN-P8-0015   7884663.19 USD Drilling services sales settlement 2025
+  TXN-P8-0014   -600603.54 USD Construction all-risk insurance — Q3 2025
+  TXN-P8-0048   -337300.48 USD Trade press marketing insertion — Almaty office, Q2 2025
+  TXN-P8-0049    447798.93 USD Interest recovery on overpayment — Atyrau terminal, December 2025
+  TXN-P8-0040   -819861.31 USD Quarterly estimated tax — Almaty office, December
+  TXN-P8-0030  -1918204.36 USD Purchase of drilling rig equipment
+  TXN-P8-0022   1336879.34 USD Insurance broker rebate
+  TXN-P8-0045   1763809.47 USD Utility deposit returned — Atyrau terminal
+  TXN-P8-0041   -474627.65 EUR Telecom leased line — Kyzylorda station 2025
+  TXN-P8-0053   -980969.76 USD Municipal tax levy — Ekibastuz block B, Q1 2025
+  TXN-P8-0003  -7531552.68 USD Marketing research panel subscription — period 04
+  TXN-P8-0011 -13795865.18 USD Radio ad campaign schedule — October
+  TXN-P8-0054    834559.44 USD Marketing volume rebate — Uralsk annex 2025
+  TXN-P8-0016   -342118.65 USD Management advisory retainer
+  TXN-P8-0026   -603369.52 USD Parking garage lease — Taraz site, H1
+  TXN-P8-0027   -597868.57 USD Antenna mast lease — Almaty office, period 04 2025
+  TXN-P8-0032 -12763690.64 USD Vehicle tax payment — H2
+  TXN-P8-0039  -6590520.51 USD Municipal tax levy — Zhezkazgan compound
+  TXN-P8-0044  -3012006.14 USD Ground lease instalment — Semey base
+  TXN-P8-0046  -3457494.06 USD Outdoor marketing site hire 2025
+  TXN-P8-0052    238324.18 USD Unearned insurance premium return — Almaty office, December
+  TXN-P8-0029    358996.46 USD Marketing overbilling refund — Shymkent depot, May 2025
+  TXN-P8-0033  -4122177.44 USD Environmental emissions tax — December
+  TXN-P8-0037   1124814.37 USD Sublet rent received — Pavlodar block 2025
+  TXN-P8-0018  -5553186.31 USD Interest on bridge facility — April 2025
+  TXN-P8-0036   2790305.49 USD Insurance deductible recovery — Kyzylorda station, Q4
+  TXN-P8-0042  -7408064.41 USD Regional marketing campaign production — Aktobe hub
+  TXN-P8-0031          nan USD Rotational staff payroll settlement Q4 2025
+  TXN-P8-0025   -358623.84 EUR Interest on working capital line — period 03
+  TXN-P8-0047   3534594.74 USD Marketing agency credit note
+  TXN-P8-0019  -1992329.27 USD Customer newsletter marketing production 2025
+  TXN-P8-0051    394816.89 USD Lease deposit released — March
+  TXN-P8-0010   6918308.23 USD Unearned insurance premium return — Q4
+  TXN-P8-0009    182205.42 USD Marketing overbilling refund — December
+  TXN-P8-0035   -142950.51 USD Customer newsletter marketing production — Zhezkazgan compound, September
+  TXN-P8-0034   -323730.94 USD Product launch ad campaign — March 2025
+  TXN-P8-0043  -1059444.21 USD Professional indemnity insurance — Taraz site
+
+=== P6 (56 rows) ===
+  TXN-P6-0016   -440014.44 USD Corporate income tax instalment — Kostanay centre
+  TXN-P6-0005  -4810458.99 USD Franchise tax filing
+  TXN-P6-0020  -8599812.02 USD Rent for spare parts store — Astana branch, instalment 1 2025
+  TXN-P6-0045   -466225.78 USD Business interruption insurance
+  TXN-P6-0033    6005234.9 USD Insurance premium refund — Taraz site, instalment 2
+  TXN-P6-0009   -667823.42 USD Fidelity bond insurance — Karaganda yard
+  TXN-P6-0013   -373627.82 USD Motor third-party insurance — Q4
+  TXN-P6-0052  -6295425.94 USD Rent for archive premises — Karaganda yard, June
+  TXN-P6-0023  -4274468.38 USD Customs duty and tax payment — Atyrau terminal, September
+  TXN-P6-0036  -1119866.56 USD Vehicle tax payment — November
+  TXN-P6-0053  -6391398.14 USD Retail unit rent — Zhezkazgan compound, January
+  TXN-P6-0027  -7193523.88 USD Antenna mast lease — January
+  TXN-P6-0022  -1482663.28 USD Purchase of clinker grinding equipment
+  TXN-P6-0003   -495164.18 USD Franchise tax filing — Shymkent depot, H2 2025
+  TXN-P6-0004  -1482663.19 USD Plant crew payroll disbursement 2025
+  TXN-P6-0012   -574236.97 USD Directors and officers insurance — Kyzylorda station, Q2 2025
+  TXN-P6-0047    124433.76 USD Insurance claim reimbursement — Uralsk annex
+  TXN-P6-0026    303758.54 USD Marketing agency credit note — Q4
+  TXN-P6-0008    168948.43 USD Lease incentive received — Kostanay centre, March 2025
+  TXN-P6-0041  -4204663.19 USD Kiln servicing and operating costs 2025
+  TXN-P6-0014   -322203.44 USD Cold store lease — instalment 1
+  TXN-P6-0019   1508915.83 USD Insurance deductible recovery — Karaganda yard, instalment 1
+  TXN-P6-0006  -5793220.79 USD Default interest charge — Astana branch, January
+  TXN-P6-0049   -378905.34 USD Quarterly interest coupon — Semey base
+  TXN-P6-0015   -412793.66 USD Warehouse lease
+  TXN-P6-0030   -462362.61 USD Rent for regional office — Kyzylorda station, period 01 2025
+  TXN-P6-0011  -6874501.52 USD Interest true-up charge — July
+  TXN-P6-0055    969224.15 USD Tax assessment reversal 2025
+  TXN-P6-0001   -228711.35 USD Group medical insurance premium — Shymkent depot
+  TXN-P6-0039  -7250114.44 USD Corporate brand marketing programme — June
+  TXN-P6-0031   6918204.37 USD Cement despatch sales settlement 2025
+  TXN-P6-0035   -659026.99 USD Point-of-sale marketing materials — Kyzylorda station 2025
+  TXN-P6-0024  -5904723.65 USD Equipment yard lease — May 2025
+  TXN-P6-0038   -414120.52 USD Rent for spare parts store — Oskemen unit, H2 2025
+  TXN-P6-0054   1516332.49 USD Insurance broker rebate — Semey base, H1 2025
+  TXN-P6-0042 -13977254.83 EUR Franchise tax filing — Astana branch
+  TXN-P6-0037   -630356.25 USD Environmental liability insurance — Oskemen unit, H1
+  TXN-P6-0029   -295096.87 USD Directors and officers insurance — Ekibastuz block B 2025
+  TXN-P6-0028   -477669.52 USD Quarterly interest coupon — Q1
+  TXN-P6-0051 -14699557.16 USD Accrued interest payment — Atyrau terminal, Q2 2025
+  TXN-P6-0056    -192438.2 USD Corporate brand marketing programme — H2 2025
+  TXN-P6-0018  -1140952.33 USD Capitalised interest charge — Kostanay centre 2025
+  TXN-P6-0034   -780505.67 USD Social tax remittance — Uralsk annex, November
+  TXN-P6-0017  -2350075.41 USD Interest on senior notes — period 02 2025
+  TXN-P6-0040   -418662.44 USD Management advisory retainer
+  TXN-P6-0007  -5978181.15 USD Interest on overdraft sweep — Q1
+  TXN-P6-0048  -2644884.35 USD Corporate income tax instalment — January
+  TXN-P6-0046  12073018.78 USD Interest income on treasury bills — Kostanay centre, period 04 2025
+  TXN-P6-0021   -387703.94 USD Warehouse lease — Oskemen unit, May
+  TXN-P6-0002   -197837.64 USD Container yard lease — Oskemen unit, December
+  TXN-P6-0050   -366031.92 USD Travel insurance for staff 2025
+  TXN-P6-0044   -418204.37 USD Electricity supply charges 2025
+  TXN-P6-0043   -561992.88 USD Professional indemnity insurance — Atyrau terminal, December 2025
+  TXN-P6-0025   2472615.89 USD Insurance broker rebate — Karaganda yard, October 2025
+  TXN-P6-0032  -4123428.79 USD Industry exhibition stand marketing — Oskemen unit 2025
+  TXN-P6-0010  -2100935.52 USD Corporate income tax instalment — Semey base
+
+Filtered rows: 673 (expected ~673)

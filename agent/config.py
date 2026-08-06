@@ -14,6 +14,7 @@ DEFAULT_INPUT = Path("data/open")
 DEFAULT_OUTPUT = Path("submission.json")
 
 DEADLINE = datetime(2026, 8, 9, 23, 59, 59, tzinfo=ASTANA_TZ)
+CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "eszhan.e4051@gmail.com")
 
 MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "8"))
 BUDGET_USD = Decimal(os.getenv("BUDGET_USD", "50.00"))
