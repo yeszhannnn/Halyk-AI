@@ -5,6 +5,7 @@ import json
 import logging
 from pathlib import Path
 
+import fitz
 import pdfplumber
 
 from agent.stages import StageResult
@@ -12,6 +13,8 @@ from agent.stages import StageResult
 logger = logging.getLogger(__name__)
 
 SUPPORTED_TEXT_SUFFIXES = {".txt", ".csv"}
+OCR_TEXT_THRESHOLD = 20
+OCR_DPI = 150
 
 
 def _sha256_file(path: Path) -> str:
@@ -34,6 +37,44 @@ def _extract_pdf(path: Path) -> tuple[list[str], str | None]:
     return pages, None
 
 
+def _is_scan_document(pages: list[str]) -> bool:
+    if not pages:
+        return True
+    return len(pages[0].strip()) < OCR_TEXT_THRESHOLD
+
+
+def _render_pdf_pages(
+    path: Path,
+    *,
+    doc_id: str,
+    page_count: int,
+    ocr_root: Path,
+) -> tuple[list[str], str | None]:
+    ocr_dir = ocr_root / doc_id
+    ocr_dir.mkdir(parents=True, exist_ok=True)
+    zoom = OCR_DPI / 72.0
+    matrix = fitz.Matrix(zoom, zoom)
+    rendered: list[str] = []
+
+    try:
+        with fitz.open(path) as document:
+            for page_index in range(page_count):
+                if page_index >= document.page_count:
+                    break
+                page = document[page_index]
+                image_name = f"page_{page_index + 1:04d}.png"
+                image_path = ocr_dir / image_name
+                pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+                pixmap.save(image_path)
+                rendered.append(f"ocr/{doc_id}/{image_name}")
+    except Exception as exc:  # noqa: BLE001 — keep ingest alive, surface reason
+        return rendered, str(exc)
+
+    if len(rendered) != page_count:
+        return rendered, f"rendered {len(rendered)} of {page_count} pages"
+    return rendered, None
+
+
 def _read_text_file(path: Path) -> tuple[str | None, str | None]:
     for encoding in ("utf-8", "utf-8-sig", "cp1251"):
         try:
@@ -46,7 +87,12 @@ def _read_text_file(path: Path) -> tuple[str | None, str | None]:
         return None, str(exc)
 
 
-def _ingest_file(path: Path, *, rel_path: str) -> tuple[dict | None, dict | None]:
+def _ingest_file(
+    path: Path,
+    *,
+    rel_path: str,
+    ocr_root: Path,
+) -> tuple[dict | None, dict | None]:
     suffix = path.suffix.lower()
 
     if suffix == ".pdf":
@@ -54,27 +100,44 @@ def _ingest_file(path: Path, *, rel_path: str) -> tuple[dict | None, dict | None
         pages, error = _extract_pdf(path)
         if error is not None:
             return None, {"path": rel_path, "reason": error}
-        first_page = pages[0].strip() if pages else ""
-        return {
+
+        doc_id = path.stem
+        record: dict = {
             "sha256": sha256,
             "page_count": len(pages),
             "pages": pages,
-            "needs_ocr": len(first_page) < 20,
+            "ocr_pages": [],
             "file_type": "pdf",
             "source_path": rel_path,
-        }, None
+        }
+
+        if _is_scan_document(pages):
+            ocr_pages, render_error = _render_pdf_pages(
+                path,
+                doc_id=doc_id,
+                page_count=len(pages),
+                ocr_root=ocr_root,
+            )
+            record["ocr_pages"] = ocr_pages
+            if render_error is not None:
+                logger.warning(
+                    "partial OCR render for %s: %s",
+                    rel_path,
+                    render_error,
+                )
+
+        return record, None
 
     if suffix in SUPPORTED_TEXT_SUFFIXES:
         sha256 = _sha256_file(path)
         content, error = _read_text_file(path)
         if error is not None or content is None:
             return None, {"path": rel_path, "reason": error or "unreadable text file"}
-        stripped = content.strip()
         return {
             "sha256": sha256,
             "page_count": 1,
             "pages": [content],
-            "needs_ocr": len(stripped) < 20,
+            "ocr_pages": [],
             "file_type": suffix.lstrip("."),
             "source_path": rel_path,
         }, None
@@ -87,6 +150,9 @@ def run(*, input_dir: Path, work_dir: Path) -> StageResult:
     if not documents_dir.is_dir():
         raise FileNotFoundError(f"documents directory not found: {documents_dir}")
 
+    ocr_root = work_dir / "ocr"
+    ocr_root.mkdir(parents=True, exist_ok=True)
+
     documents: dict[str, dict] = {}
     unreadable: list[dict[str, str]] = []
 
@@ -96,7 +162,7 @@ def run(*, input_dir: Path, work_dir: Path) -> StageResult:
 
         rel_path = path.relative_to(input_dir).as_posix()
         doc_id = path.stem
-        record, failure = _ingest_file(path, rel_path=rel_path)
+        record, failure = _ingest_file(path, rel_path=rel_path, ocr_root=ocr_root)
 
         if failure is not None:
             unreadable.append(failure)
@@ -115,11 +181,11 @@ def run(*, input_dir: Path, work_dir: Path) -> StageResult:
     pdf_count = sum(1 for doc in documents.values() if doc["file_type"] == "pdf")
     pdf_pages = sum(doc["page_count"] for doc in documents.values() if doc["file_type"] == "pdf")
     total_pages = sum(doc["page_count"] for doc in documents.values())
-    needs_ocr = sum(1 for doc in documents.values() if doc.get("needs_ocr"))
+    ocr_docs = sum(1 for doc in documents.values() if doc.get("ocr_pages"))
 
     print(
         f"ingest: pdfs={pdf_count} pdf_pages={pdf_pages} total_pages={total_pages} "
-        f"needs_ocr={needs_ocr} unreadable={len(unreadable)}"
+        f"ocr_docs={ocr_docs} unreadable={len(unreadable)}"
     )
 
     return StageResult(item_count=len(documents), row_count=pdf_pages)

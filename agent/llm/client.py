@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import random
@@ -70,16 +71,39 @@ def _estimate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> De
     return prompt_cost + completion_cost
 
 
-def _cache_key(*, model: str, messages: list[dict[str, Any]], params: dict[str, Any]) -> str:
+def _cache_key(
+    *,
+    model: str,
+    messages: list[dict[str, Any]],
+    params: dict[str, Any],
+    image_digests: list[str] | None = None,
+) -> str:
     payload = {
         "model": model,
         "messages": messages,
         "params": params,
+        "image_digests": image_digests or [],
     }
     digest = hashlib.sha256(
         json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8"),
     )
     return digest.hexdigest()
+
+
+def _image_digest(image_path: Path) -> str:
+    return hashlib.sha256(image_path.read_bytes()).hexdigest()
+
+
+def _encode_image_data_url(image_path: Path) -> str:
+    suffix = image_path.suffix.lower()
+    media_type = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+    }.get(suffix, "image/png")
+    encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
+    return f"data:{media_type};base64,{encoded}"
 
 
 def _cache_path(cache_key: str) -> Path:
@@ -289,3 +313,88 @@ class LLMClient:
                 retried=True,
             )
         return response_model.model_validate(payload)
+
+    async def complete_vision(
+        self,
+        *,
+        response_model: type[T],
+        prompt: str,
+        image_paths: list[Path],
+        system_prompt: str | None = None,
+        use_cache: bool = True,
+        **params: Any,
+    ) -> T:
+        content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+        for image_path in image_paths:
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": _encode_image_data_url(image_path)},
+                },
+            )
+
+        messages: list[dict[str, Any]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": content})
+
+        request_params = {
+            "temperature": TEMPERATURE,
+            "seed": OPENAI_SEED,
+            **params,
+        }
+        serializable_messages = json.loads(json.dumps(messages, ensure_ascii=False))
+        image_digests = [_image_digest(path) for path in image_paths]
+        cache_key = _cache_key(
+            model=self.model,
+            messages=serializable_messages,
+            params=request_params,
+            image_digests=image_digests,
+        )
+
+        if use_cache:
+            cached = _read_cache(cache_key, response_model, self.counter)
+            if cached is not None:
+                return cached
+
+        self.counter.cache_misses += 1
+        _ensure_budget()
+
+        last_exc: Exception | None = None
+        for attempt in range(6):
+            try:
+                async with self._semaphore:
+                    _ensure_budget()
+                    parsed, completion = await self._client.chat.completions.create_with_completion(
+                        model=self.model,
+                        messages=messages,
+                        response_model=response_model,
+                        **request_params,
+                    )
+                usage = getattr(completion, "usage", None)
+                usage_dict = {
+                    "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
+                    "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
+                    "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
+                }
+                cost = _record_usage(self.model, usage, self.counter)
+                if use_cache:
+                    _write_cache(
+                        cache_key,
+                        response=parsed,
+                        usage=usage_dict,
+                        cost_usd=cost,
+                    )
+                return parsed
+            except BudgetExceededError:
+                raise
+            except (RateLimitError, APIConnectionError, APITimeoutError) as exc:
+                last_exc = exc
+                await _sleep_with_backoff(attempt, exc)
+            except Exception as exc:
+                last_exc = exc
+                if attempt >= 5:
+                    break
+                await _sleep_with_backoff(attempt, exc)
+
+        raise RuntimeError("Vision LLM request failed after retries") from last_exc

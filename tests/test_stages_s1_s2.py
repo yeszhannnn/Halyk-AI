@@ -35,7 +35,18 @@ def test_ingest_open_dataset_constants(work_dir: Path) -> None:
     pdf_docs = [doc for doc in documents.values() if doc["file_type"] == "pdf"]
     assert len(pdf_docs) == 200
     assert sum(doc["page_count"] for doc in pdf_docs) == 843
-    assert sum(1 for doc in documents.values() if doc.get("needs_ocr")) == 1
+
+    scan_docs = [
+        (doc_id, doc)
+        for doc_id, doc in documents.items()
+        if doc.get("ocr_pages")
+    ]
+    assert len(scan_docs) == 1
+    _scan_id, scan_doc = scan_docs[0]
+    assert len(scan_doc["pages"][0].strip()) < 20
+    assert len(scan_doc["ocr_pages"]) == scan_doc["page_count"]
+    for rel_path in scan_doc["ocr_pages"]:
+        assert (work_dir / rel_path).is_file()
 
     assert "904dea48b34b" in documents
     assert "4a5315740e89" in documents
