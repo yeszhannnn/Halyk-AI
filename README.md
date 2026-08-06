@@ -148,8 +148,7 @@ Python 3.11 and an OpenAI API key. No GPU. Dependencies are pinned in `pyproject
 
 ## Compliance
 
-Code in this repository was authored with the assistance of Cursor. Every answer in
-`submission.json` is produced by the pipeline in this repository, executed as the single
+Every answer in `submission.json` is produced by the pipeline in this repository, executed as the single
 command shown above against the competition dataset. No answer was obtained from an
 interactive agent, and no answer was entered by hand. The run manifest records the git
 SHA, dataset hash and model versions so that any submission can be reproduced and
