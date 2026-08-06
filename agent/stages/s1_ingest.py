@@ -13,7 +13,7 @@ from agent.stages import StageResult
 logger = logging.getLogger(__name__)
 
 SUPPORTED_TEXT_SUFFIXES = {".txt", ".csv"}
-OCR_TEXT_THRESHOLD = 20
+OCR_TEXT_THRESHOLD = 100
 OCR_DPI = 150
 
 
@@ -37,41 +37,57 @@ def _extract_pdf(path: Path) -> tuple[list[str], str | None]:
     return pages, None
 
 
-def _is_scan_document(pages: list[str]) -> bool:
-    if not pages:
-        return True
-    return len(pages[0].strip()) < OCR_TEXT_THRESHOLD
+def _detect_image_only_pages(path: Path, pages: list[str]) -> list[int]:
+    """Pages with sparse text and at least one embedded image."""
+    candidates: list[int] = []
+    try:
+        with fitz.open(path) as document:
+            for page_index, page_text in enumerate(pages):
+                if len(page_text.strip()) >= OCR_TEXT_THRESHOLD:
+                    continue
+                if page_index >= document.page_count:
+                    continue
+                if document[page_index].get_images():
+                    candidates.append(page_index)
+    except Exception as exc:  # noqa: BLE001 — keep ingest alive, surface reason
+        logger.warning("image page detection failed for %s: %s", path, exc)
+    return candidates
 
 
 def _render_pdf_pages(
     path: Path,
     *,
     doc_id: str,
-    page_count: int,
+    page_indices: list[int],
     ocr_root: Path,
-) -> tuple[list[str], str | None]:
+) -> tuple[list[dict[str, int | str]], str | None]:
     ocr_dir = ocr_root / doc_id
     ocr_dir.mkdir(parents=True, exist_ok=True)
     zoom = OCR_DPI / 72.0
     matrix = fitz.Matrix(zoom, zoom)
-    rendered: list[str] = []
+    rendered: list[dict[str, int | str]] = []
 
     try:
         with fitz.open(path) as document:
-            for page_index in range(page_count):
+            for page_index in page_indices:
                 if page_index >= document.page_count:
-                    break
+                    continue
                 page = document[page_index]
                 image_name = f"page_{page_index + 1:04d}.png"
                 image_path = ocr_dir / image_name
                 pixmap = page.get_pixmap(matrix=matrix, alpha=False)
                 pixmap.save(image_path)
-                rendered.append(f"ocr/{doc_id}/{image_name}")
+                rendered.append(
+                    {
+                        "page_number": page_index + 1,
+                        "image_path": f"ocr/{doc_id}/{image_name}",
+                    },
+                )
     except Exception as exc:  # noqa: BLE001 — keep ingest alive, surface reason
         return rendered, str(exc)
 
-    if len(rendered) != page_count:
-        return rendered, f"rendered {len(rendered)} of {page_count} pages"
+    if len(rendered) != len(page_indices):
+        return rendered, f"rendered {len(rendered)} of {len(page_indices)} pages"
     return rendered, None
 
 
@@ -111,11 +127,12 @@ def _ingest_file(
             "source_path": rel_path,
         }
 
-        if _is_scan_document(pages):
+        image_page_indices = _detect_image_only_pages(path, pages)
+        if image_page_indices:
             ocr_pages, render_error = _render_pdf_pages(
                 path,
                 doc_id=doc_id,
-                page_count=len(pages),
+                page_indices=image_page_indices,
                 ocr_root=ocr_root,
             )
             record["ocr_pages"] = ocr_pages
@@ -182,10 +199,11 @@ def run(*, input_dir: Path, work_dir: Path) -> StageResult:
     pdf_pages = sum(doc["page_count"] for doc in documents.values() if doc["file_type"] == "pdf")
     total_pages = sum(doc["page_count"] for doc in documents.values())
     ocr_docs = sum(1 for doc in documents.values() if doc.get("ocr_pages"))
+    ocr_page_count = sum(len(doc.get("ocr_pages", [])) for doc in documents.values())
 
     print(
         f"ingest: pdfs={pdf_count} pdf_pages={pdf_pages} total_pages={total_pages} "
-        f"ocr_docs={ocr_docs} unreadable={len(unreadable)}"
+        f"ocr_docs={ocr_docs} ocr_pages={ocr_page_count} unreadable={len(unreadable)}",
     )
 
     return StageResult(item_count=len(documents), row_count=pdf_pages)

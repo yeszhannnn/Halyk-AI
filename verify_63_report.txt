@@ -1,0 +1,12 @@
+[OK] B1 SUM 6.3: outflows=307018.08 expected=307018.08 related=1 parties=['Ertis Capital, LLP']
+[OK] B4 SUM 6.3: outflows=303949.09 expected=303949.09 related=2 parties=['Kazyna Capital LLP.', 'Shymkent Fuel Distributors LLP']
+[OK] P1 SUM 6.3: outflows=283664.18 expected=283664.18 related=1 parties=['Aktau Holdings LLP']
+[--] P10 RATIO 6.3: actual=0.04 (not outflow sum; skip)
+[--] P2 RATIO 6.3: actual=0.04 (not outflow sum; skip)
+[OK] P3 SUM 6.3: outflows=264117.82 expected=264117.82 related=1 parties=['"Turan Capital" LLP']
+[--] P4 RATIO 6.3: actual=0.04 (not outflow sum; skip)
+[OK] P5 SUM 6.3: outflows=273418.66 expected=273418.66 related=1 parties=['Sarybel Capital LLP.']
+[FAIL] P6 SUM 6.3: outflows=418662.44 expected=1482663.28 related=1 parties=['"Taraz Holding Group" LLP']
+[OK] P7 SUM 6.3: outflows=291663.82 expected=291663.82 related=1 parties=['Atyrau Holding Group L.L.P.']
+[--] P8 RATIO 6.3: actual=0.04 (not outflow sum; skip)
+[OK] P9 SUM 6.3: outflows=268447.19 expected=268447.19 related=1 parties=['Ulytau Capital LLP.']

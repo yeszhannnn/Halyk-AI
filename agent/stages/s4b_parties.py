@@ -18,44 +18,61 @@ from agent.stages import StageResult
 
 HEADER_ACCOUNT_PATTERN = re.compile(r"Сч[её]т\s+(ACC-\d+)", re.IGNORECASE)
 LEGAL_SUFFIX_PATTERN = re.compile(
-    r"[\s,.\-]*(?:l\.?\s*l\.?\s*p\.?|j\.?\s*s\.?\s*c\.?|gmbh)\.?\s*$",
+    r"[\s,.\-]*(?:l(?:\.[\s]*){2}p|l\.?\s*l\.?\s*p\.?|j\.?\s*s\.?\s*c\.?|gmbh)\.?\s*$",
     re.IGNORECASE,
 )
-SPARSE_PAGE_TEXT_THRESHOLD = 20
+SPARSE_PAGE_TEXT_THRESHOLD = 100
 OCR_RENDER_DPI = 150
 EXTRACTOR = "s4b_parties"
 TEXT_CONFIDENCE = Decimal("0.95")
 TEXT_UNVERIFIED_CONFIDENCE = Decimal("0.70")
 OCR_CONFIDENCE = Decimal("0.60")
 
-SYSTEM_PROMPT = """You extract KYC related-party ownership data from Russian/English bank dossiers.
+SYSTEM_PROMPT = """You extract KYC ownership/perimeter data from Russian/English bank dossiers.
 
 Rules:
 - Return only information explicitly visible in the provided dossier text or images.
 - header_account must be the account id from the dossier header line beginning with "Счёт ACC-...".
-- ownership_rows must list every row from the ownership table with counterparty name and voting-rights percentage.
-- threshold_pct is the numeric percentage from the related-party definition sentence
-  (e.g. when text says the Group holds 35.0% or more of voting rights, threshold_pct is 35.0).
+- ownership_rows must list every row from the table beneath the header with counterparty name and percentage.
+- table_semantics must be one of:
+  - RELATED_PARTY: the rule sentence defines related parties; organisations at or above threshold_pct
+    are related parties (e.g. Group holds 35.0% or more of voting rights).
+  - UNRESTRICTED_SUBSIDIARY: the rule sentence defines a security/perimeter threshold; subsidiaries
+    below threshold_pct are unrestricted (e.g. pledged assets below 50.0% of voting rights).
+- threshold_pct is the numeric percentage from that rule sentence — read it from each dossier, never hardcode.
 - Every scalar field must have a matching *_quote field copied verbatim from the source.
 - Percentages are numeric values without the % sign (41.2 not 0.412).
-- Do not infer or hardcode thresholds; read them from each dossier.
+- Do not infer semantics from the "РАБОЧИЙ ДОКУМЕНТ" label; use the rule sentence beneath the table.
 """
 
-VISION_PROMPT = """Extract the KYC dossier header account, ownership table, and related-party threshold sentence
-from these scanned dossier page images.
+VISION_PROMPT = """Extract the KYC dossier header account, ownership/perimeter table, rule sentence beneath it,
+and threshold from these scanned dossier page images.
 
-The ownership table lists counterparties and the Group's share of voting rights.
-The threshold sentence states from which ownership percentage organisations are recognised as related parties.
+Determine table_semantics from the rule sentence:
+- RELATED_PARTY when the threshold marks related-party status at or above the percentage.
+- UNRESTRICTED_SUBSIDIARY when subsidiaries below the percentage are unrestricted.
 """
 
 
 def normalize_counterparty(name: str) -> str:
     stripped = name.strip()
-    for char in "\"'«»":
+    for char in "\"'«»""''":
         stripped = stripped.replace(char, "")
+    stripped = stripped.strip("\"'«»""''")
     collapsed = " ".join(stripped.split()).casefold()
+    collapsed = re.sub(r",\s*(?=(?:l\.?\s*){0,3}p\.?\s*$)", "", collapsed, flags=re.IGNORECASE)
     collapsed = LEGAL_SUFFIX_PATTERN.sub("", collapsed).strip()
     return collapsed.rstrip(".,;:-").strip()
+
+
+def _ocr_page_image_paths(work_dir: Path, ocr_pages: list[Any]) -> list[Path]:
+    paths: list[Path] = []
+    for entry in ocr_pages:
+        if isinstance(entry, dict):
+            paths.append(work_dir / str(entry["image_path"]))
+        else:
+            paths.append(work_dir / str(entry))
+    return paths
 
 
 def _decimal_to_str(value: Decimal) -> str:
@@ -74,6 +91,7 @@ def _extract_header_account(text: str) -> str | None:
 def _quote_checks(result: KycPartiesExtract, verification_text: str) -> list[tuple[str, str, str]]:
     checks: list[tuple[str, str, str]] = [
         ("header_account", result.header_account_quote, verification_text),
+        ("table_semantics", result.table_semantics_quote, verification_text),
         ("threshold", result.threshold_quote, verification_text),
     ]
     for index, row in enumerate(result.ownership_rows):
@@ -109,7 +127,7 @@ def _confidence_from_verification(verification: dict[str, bool], *, source_kind:
 
 def _review_fields_for_source(source_kind: str, verification: dict[str, bool]) -> list[str]:
     if source_kind == "ocr":
-        return ["header_account", "threshold", "ownership_rows"]
+        return ["header_account", "table_semantics", "threshold", "ownership_rows"]
     return [field for field, verified in verification.items() if not verified]
 
 
@@ -127,19 +145,30 @@ def _serialize_provenance(
     }
 
 
+def _row_is_related(
+    ownership_pct: Decimal,
+    threshold: Decimal,
+    table_semantics: str,
+) -> bool:
+    if table_semantics == "UNRESTRICTED_SUBSIDIARY":
+        return ownership_pct < threshold
+    return ownership_pct >= threshold
+
+
 def _related_parties_from_extract(
     extracted: KycPartiesExtract,
     *,
     doc_id: str,
     pages: list[str],
     threshold: Decimal,
+    table_semantics: str,
     source_kind: str,
 ) -> tuple[list[RelatedParty], list[dict[str, Any]]]:
     parties: list[RelatedParty] = []
     serialized_rows: list[dict[str, Any]] = []
 
     for row in extracted.ownership_rows:
-        is_related = row.ownership_pct >= threshold
+        is_related = _row_is_related(row.ownership_pct, threshold, table_semantics)
         page = _source_page_for_quote(pages, row.counterparty_quote)
         provenance = Provenance(
             doc_id=doc_id,
@@ -182,6 +211,12 @@ def _build_ledger_map(
     return ledger_map
 
 
+def _is_scanned_dossier(doc: dict[str, Any]) -> bool:
+    return bool(doc.get("ocr_pages")) and all(
+        len(page.strip()) < SPARSE_PAGE_TEXT_THRESHOLD for page in doc["pages"]
+    )
+
+
 def _discover_kyc_candidates(
     inventory: dict[str, Any],
     classified: dict[str, Any],
@@ -189,7 +224,7 @@ def _discover_kyc_candidates(
     candidates: list[tuple[str, dict[str, Any]]] = []
     for doc_id, doc in inventory["documents"].items():
         record = classified["documents"][doc_id]
-        if record["doc_type"] == "KYC" or doc.get("ocr_pages"):
+        if record["doc_type"] == "KYC" or _is_scanned_dossier(doc):
             candidates.append((doc_id, doc))
     return candidates
 
@@ -204,11 +239,16 @@ def _render_sparse_pages(
     if not source_path.is_file():
         return []
 
-    sparse_indices = [
-        index
-        for index, page_text in enumerate(doc["pages"])
-        if len(page_text.strip()) < SPARSE_PAGE_TEXT_THRESHOLD
-    ]
+    sparse_indices: list[int] = []
+    with fitz.open(source_path) as pdf:
+        for index, page_text in enumerate(doc["pages"]):
+            if len(page_text.strip()) >= SPARSE_PAGE_TEXT_THRESHOLD:
+                continue
+            if index >= pdf.page_count:
+                continue
+            if pdf[index].get_images():
+                sparse_indices.append(index)
+
     if not sparse_indices:
         return []
 
@@ -220,8 +260,6 @@ def _render_sparse_pages(
 
     with fitz.open(source_path) as pdf:
         for page_index in sparse_indices:
-            if page_index >= pdf.page_count:
-                continue
             image_path = out_dir / f"sparse_page_{page_index + 1:04d}.png"
             if not image_path.is_file():
                 pdf[page_index].get_pixmap(matrix=matrix, alpha=False).save(image_path)
@@ -237,7 +275,7 @@ def _vision_image_paths(
     doc: dict[str, Any],
 ) -> list[Path]:
     if doc.get("ocr_pages"):
-        return [work_dir / rel_path for rel_path in doc["ocr_pages"]]
+        return _ocr_page_image_paths(work_dir, doc["ocr_pages"])
     return _render_sparse_pages(work_dir=work_dir, doc_id=doc_id, doc=doc)
 
 
@@ -256,7 +294,7 @@ async def _extract_from_text(
             "content": (
                 f"Scenario: {scenario_id}\n"
                 f"Document: {doc_id}\n\n"
-                "Extract ownership table and related-party threshold from this dossier text:\n\n"
+                "Extract the ownership/perimeter table, rule sentence, and threshold from this dossier text:\n\n"
                 f"{verification_text}"
             ),
         },
@@ -291,6 +329,7 @@ async def _extract_from_images(
     )
     verification = {
         "header_account": False,
+        "table_semantics": False,
         "threshold": False,
     }
     for index in range(len(extracted.ownership_rows)):
@@ -304,9 +343,30 @@ def _needs_vision_fallback(extracted: KycPartiesExtract, verification: dict[str,
         return True
     if not extracted.threshold_quote.strip():
         return True
+    if not extracted.table_semantics_quote.strip():
+        return True
     if not all(verification.values()):
         return True
     return False
+
+
+def _merge_text_and_vision_extract(
+    text_extracted: KycPartiesExtract,
+    vision_extracted: KycPartiesExtract,
+    *,
+    text_header: str | None,
+) -> KycPartiesExtract:
+    updates: dict[str, Any] = {
+        "ownership_rows": vision_extracted.ownership_rows,
+        "table_semantics": vision_extracted.table_semantics,
+        "table_semantics_quote": vision_extracted.table_semantics_quote,
+        "threshold_pct": vision_extracted.threshold_pct,
+        "threshold_quote": vision_extracted.threshold_quote,
+    }
+    if text_header is None:
+        updates["header_account"] = vision_extracted.header_account
+        updates["header_account_quote"] = vision_extracted.header_account_quote
+    return text_extracted.model_copy(update=updates)
 
 
 async def _extract_dossier(
@@ -316,10 +376,13 @@ async def _extract_dossier(
     scenario_id: str,
     doc_id: str,
     doc: dict[str, Any],
-) -> tuple[KycPartiesExtract, dict[str, bool], str, list[str]]:
+) -> tuple[KycPartiesExtract, dict[str, bool], str, list[str], KycPartiesExtract | None]:
     pages = doc["pages"]
+    text_header = _extract_header_account("\n".join(pages))
+    fully_scanned = text_header is None and _is_scanned_dossier(doc)
+    perimeter: KycPartiesExtract | None = None
 
-    if doc.get("ocr_pages"):
+    if fully_scanned:
         image_paths = _vision_image_paths(work_dir=work_dir, doc_id=doc_id, doc=doc)
         extracted, verification, source_kind = await _extract_from_images(
             client,
@@ -327,7 +390,7 @@ async def _extract_dossier(
             doc_id=doc_id,
             image_paths=image_paths,
         )
-        return extracted, verification, source_kind, _review_fields_for_source(source_kind, verification)
+        return extracted, verification, source_kind, _review_fields_for_source(source_kind, verification), None
 
     extracted, verification, source_kind = await _extract_from_text(
         client,
@@ -336,7 +399,31 @@ async def _extract_dossier(
         pages=pages,
     )
 
-    if _needs_vision_fallback(extracted, verification):
+    if doc.get("ocr_pages"):
+        image_paths = _vision_image_paths(work_dir=work_dir, doc_id=doc_id, doc=doc)
+        vision_extracted, vision_verification, _ = await _extract_from_images(
+            client,
+            scenario_id=scenario_id,
+            doc_id=doc_id,
+            image_paths=image_paths,
+        )
+        if _needs_vision_fallback(extracted, verification):
+            extracted = _merge_text_and_vision_extract(
+                extracted,
+                vision_extracted,
+                text_header=text_header,
+            )
+            verification = vision_verification
+            if text_header is not None:
+                verification["header_account"] = True
+            source_kind = "ocr"
+        elif (
+            vision_extracted.table_semantics == "UNRESTRICTED_SUBSIDIARY"
+            and extracted.ownership_rows
+            and vision_extracted.ownership_rows
+        ):
+            perimeter = vision_extracted
+    elif _needs_vision_fallback(extracted, verification):
         image_paths = _vision_image_paths(work_dir=work_dir, doc_id=doc_id, doc=doc)
         if image_paths:
             extracted, verification, source_kind = await _extract_from_images(
@@ -347,7 +434,7 @@ async def _extract_dossier(
             )
 
     review_fields = _review_fields_for_source(source_kind, verification)
-    return extracted, verification, source_kind, review_fields
+    return extracted, verification, source_kind, review_fields, perimeter
 
 
 async def _resolve_scenario_for_dossier(
@@ -358,6 +445,10 @@ async def _resolve_scenario_for_dossier(
     doc: dict[str, Any],
     account_to_scenario: dict[str, str],
 ) -> tuple[str | None, KycPartiesExtract | None]:
+    header_account = _extract_header_account("\n".join(doc["pages"]))
+    if header_account is not None:
+        return account_to_scenario.get(header_account), None
+
     if doc.get("ocr_pages"):
         image_paths = _vision_image_paths(work_dir=work_dir, doc_id=doc_id, doc=doc)
         extracted, _, _ = await _extract_from_images(
@@ -369,10 +460,7 @@ async def _resolve_scenario_for_dossier(
         header_account = extracted.header_account.strip().upper()
         return account_to_scenario.get(header_account), extracted
 
-    header_account = _extract_header_account("\n".join(doc["pages"]))
-    if header_account is None:
-        return None, None
-    return account_to_scenario.get(header_account), None
+    return None, None
 
 
 def _sum_related_outflows(
@@ -424,6 +512,29 @@ def _verify_payload(
     scenarios = payload["scenarios"]
     if len(scenarios) != 12:
         raise AssertionError(f"expected 12 scenarios, got {len(scenarios)}")
+
+    perimeter_scenario: str | None = None
+    for scenario_id, rec in scenarios.items():
+        peri = rec.get("perimeter")
+        if peri is None:
+            continue
+        pcts = sorted(Decimal(str(row["ownership_pct"])) for row in peri["ownership"])
+        threshold = Decimal(str(peri["threshold_pct"]))
+        if pcts == [Decimal("11.4"), Decimal("87.6")] and threshold == Decimal("50.0"):
+            perimeter_scenario = scenario_id
+            related = [row for row in peri["ownership"] if row["is_related"]]
+            if len(related) != 1:
+                raise AssertionError(
+                    f"{scenario_id} perimeter expected 1 unrestricted subsidiary, got {len(related)}",
+                )
+            if peri.get("table_semantics") != "UNRESTRICTED_SUBSIDIARY":
+                raise AssertionError(
+                    f"{scenario_id} perimeter expected UNRESTRICTED_SUBSIDIARY semantics, "
+                    f"got {peri.get('table_semantics')}",
+                )
+            break
+    if perimeter_scenario is None:
+        raise AssertionError("perimeter table with 87.6/11.4 and 50.0 threshold not found")
 
     p5 = scenarios["P5"]
     p5_related = [row for row in p5["ownership"] if row["is_related"]]
@@ -544,6 +655,7 @@ async def _run_async(work_dir: Path) -> StageResult:
             extracted = pre_extracted[doc_id]
             verification = {
                 "header_account": False,
+                "table_semantics": False,
                 "threshold": False,
             }
             for index in range(len(extracted.ownership_rows)):
@@ -551,8 +663,9 @@ async def _run_async(work_dir: Path) -> StageResult:
                 verification[f"ownership_{index}_pct"] = False
             source_kind = "ocr"
             review_fields = _review_fields_for_source(source_kind, verification)
+            perimeter = None
         else:
-            extracted, verification, source_kind, review_fields = await _extract_dossier(
+            extracted, verification, source_kind, review_fields, perimeter = await _extract_dossier(
                 client,
                 work_dir=work_dir,
                 scenario_id=scenario_id,
@@ -571,12 +684,14 @@ async def _run_async(work_dir: Path) -> StageResult:
             continue
 
         threshold = extracted.threshold_pct
+        table_semantics = extracted.table_semantics
         pages = doc["pages"]
         parties, ownership_rows = _related_parties_from_extract(
             extracted,
             doc_id=doc_id,
             pages=pages,
             threshold=threshold,
+            table_semantics=table_semantics,
             source_kind=source_kind,
         )
         related_counterparties = [party.counterparty for party in parties if party.is_related]
@@ -589,11 +704,22 @@ async def _run_async(work_dir: Path) -> StageResult:
 
         confidence = _confidence_from_verification(verification, source_kind=source_kind)
         threshold_page = _source_page_for_quote(pages, extracted.threshold_quote)
+        semantics_page = _source_page_for_quote(pages, extracted.table_semantics_quote)
 
         scenario_payloads[scenario_id] = {
             "scenario_id": scenario_id,
             "doc_id": doc_id,
             "header_account": extracted.header_account,
+            "table_semantics": table_semantics,
+            "table_semantics_source": _serialize_provenance(
+                Provenance(
+                    doc_id=doc_id,
+                    page=semantics_page,
+                    quote=extracted.table_semantics_quote,
+                    extractor=EXTRACTOR,
+                ),
+                source_kind=source_kind,
+            ),
             "threshold_pct": _decimal_to_str(threshold),
             "threshold_source": _serialize_provenance(
                 Provenance(
@@ -614,6 +740,28 @@ async def _run_async(work_dir: Path) -> StageResult:
             "review_fields": review_fields,
             "verification": verification,
         }
+
+        if perimeter is not None:
+            peri_threshold = perimeter.threshold_pct
+            _, peri_rows = _related_parties_from_extract(
+                perimeter,
+                doc_id=doc_id,
+                pages=pages,
+                threshold=peri_threshold,
+                table_semantics=perimeter.table_semantics,
+                source_kind="ocr",
+            )
+            scenario_payloads[scenario_id]["perimeter"] = {
+                "table_semantics": perimeter.table_semantics,
+                "threshold_pct": _decimal_to_str(peri_threshold),
+                "ownership": peri_rows,
+            }
+            scenario_payloads[scenario_id]["review_fields"] = list(
+                dict.fromkeys(
+                    scenario_payloads[scenario_id]["review_fields"]
+                    + ["perimeter"],
+                ),
+            )
 
     payload = {
         "scenarios": scenario_payloads,

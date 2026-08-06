@@ -68,9 +68,9 @@ class RelatedParty:
 
 @dataclass(frozen=True)
 class Adjustment:
-    """Корректировка из примечаний аудитора. Пять видов."""
+    """Корректировка из примечаний аудитора или источника корректировок."""
 
-    kind: str  # RECLASS | CUTOFF | EXCLUDE | OFF_LEDGER | FX
+    kind: str  # RECLASS | CUTOFF | EXCLUDE | OFF_LEDGER | AMOUNT_FILL | FX | EBITDA_ADDBACK | NONE
     scenario_id: str
     txn_id: str | None  # если привязана к операции
     amount: Decimal | None  # если задана суммой + контрагентом

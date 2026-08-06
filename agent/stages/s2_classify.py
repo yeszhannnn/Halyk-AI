@@ -8,9 +8,17 @@ from pathlib import Path
 from agent.stages import StageResult
 
 MARKERS: list[tuple[str, re.Pattern[str]]] = [
+    (
+        "SUPERSEDED_DRAFT",
+        re.compile(r"ЗАМЕНЕНА ОКОНЧАТЕЛЬНЫМ|ПРОЕКТ|не может служить основанием"),
+    ),
     ("LOAN_SUPERSEDED", re.compile(r"НЕ ПРИМЕНЯЕТСЯ|НЕДЕЙСТВУЮЩАЯ РЕДАКЦИЯ")),
     ("LOAN", re.compile(r"ИСПОЛНИТЕЛЬНЫЙ ЭКЗЕМПЛЯР|Старший обеспеченный заём")),
     ("AUDIT_NOTES", re.compile(r"АУДИТОРСКОЕ ДЕЛО|Примечания к финансовой отчётности")),
+    (
+        "ADJUSTMENT_SOURCE",
+        re.compile(r"Отчёт о выполнении согласованных процедур|Служебная записка казначейства"),
+    ),
     ("KYC", re.compile(r"Знай своего клиента|НАДЛЕЖАЩАЯ ПРОВЕРКА КЛИЕНТА")),
     ("AUDIT_PLANNING", re.compile(r"Внешний аудит — Записка о планировании")),
 ]
@@ -18,7 +26,9 @@ MARKERS: list[tuple[str, re.Pattern[str]]] = [
 ACC_PATTERN = re.compile(r"ACC-\d+")
 
 EXPECTED_PDF_COUNTS: dict[str, int] = {
-    "NOISE": 145,
+    "NOISE": 138,
+    "SUPERSEDED_DRAFT": 5,
+    "ADJUSTMENT_SOURCE": 2,
     "LOAN": 12,
     "LOAN_SUPERSEDED": 12,
     "AUDIT_NOTES": 12,
@@ -51,9 +61,11 @@ def _extract_acc_ids(text: str) -> list[str]:
 
 def _print_summary_table(counts: Counter[str], *, pdf_total: int) -> None:
     order = [
+        "SUPERSEDED_DRAFT",
         "LOAN_SUPERSEDED",
         "LOAN",
         "AUDIT_NOTES",
+        "ADJUSTMENT_SOURCE",
         "KYC",
         "AUDIT_PLANNING",
         "NOISE",

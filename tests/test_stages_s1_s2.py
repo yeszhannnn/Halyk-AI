@@ -11,7 +11,9 @@ from agent.stages import s1_ingest, s2_classify
 OPEN_DATA = Path(__file__).resolve().parents[1] / "data" / "open"
 
 EXPECTED_PDF_COUNTS = {
-    "NOISE": 145,
+    "NOISE": 138,
+    "SUPERSEDED_DRAFT": 5,
+    "ADJUSTMENT_SOURCE": 2,
     "LOAN": 12,
     "LOAN_SUPERSEDED": 12,
     "AUDIT_NOTES": 12,
@@ -41,12 +43,15 @@ def test_ingest_open_dataset_constants(work_dir: Path) -> None:
         for doc_id, doc in documents.items()
         if doc.get("ocr_pages")
     ]
-    assert len(scan_docs) == 1
-    _scan_id, scan_doc = scan_docs[0]
-    assert len(scan_doc["pages"][0].strip()) < 20
-    assert len(scan_doc["ocr_pages"]) == scan_doc["page_count"]
-    for rel_path in scan_doc["ocr_pages"]:
-        assert (work_dir / rel_path).is_file()
+    assert len(scan_docs) == 4
+    ocr_page_count = sum(len(doc["ocr_pages"]) for _, doc in scan_docs)
+    assert ocr_page_count == 7
+    for _scan_id, scan_doc in scan_docs:
+        for entry in scan_doc["ocr_pages"]:
+            assert isinstance(entry, dict)
+            assert "page_number" in entry
+            assert "image_path" in entry
+            assert (work_dir / entry["image_path"]).is_file()
 
     assert "904dea48b34b" in documents
     assert "4a5315740e89" in documents
