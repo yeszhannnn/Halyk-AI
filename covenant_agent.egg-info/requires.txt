@@ -1,0 +1,9 @@
+pdfplumber
+pymupdf
+duckdb
+pandas
+pydantic
+instructor
+openai
+python-dotenv
+pytest

@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "covenant-agent"
+version = "0.1.0"
+description = "Bank covenant checking agent"
+requires-python = ">=3.11"
+dependencies = [
+    "pdfplumber",
+    "pymupdf",
+    "duckdb",
+    "pandas",
+    "pydantic",
+    "instructor",
+    "openai",
+    "python-dotenv",
+    "pytest",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["agent*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

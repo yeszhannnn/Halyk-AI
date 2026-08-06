@@ -1,0 +1,14 @@
+Metadata-Version: 2.4
+Name: covenant-agent
+Version: 0.1.0
+Summary: Bank covenant checking agent
+Requires-Python: >=3.11
+Requires-Dist: pdfplumber
+Requires-Dist: pymupdf
+Requires-Dist: duckdb
+Requires-Dist: pandas
+Requires-Dist: pydantic
+Requires-Dist: instructor
+Requires-Dist: openai
+Requires-Dist: python-dotenv
+Requires-Dist: pytest
