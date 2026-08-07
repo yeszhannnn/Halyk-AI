@@ -38,7 +38,13 @@ def main() -> None:
     for cov in covs:
         sid, slot = cov["scenario_id"], cov["slot"]
         gt = GT["scenarios"][sid]["covenants"][slot]
-        val = compute_covenant_metric(cov, ledger, parties=parties.get(sid), adjustments=adjs)
+        val = compute_covenant_metric(
+            cov,
+            ledger,
+            parties=parties.get(sid),
+            adjustments=adjs,
+            work_dir=WD,
+        )
         st = "BREACH" if breaches(val, cov["direction"], Decimal(str(cov["threshold"]))) else "COMPLIANT"
         ok = st == gt["status"]
         if not ok:

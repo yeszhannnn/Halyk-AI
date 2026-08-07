@@ -17,13 +17,10 @@ if str(ROOT) not in sys.path:
 
 from agent.evidence.quotes import verify_quote
 from agent.metrics.engine import (
-    _filter_rows,
-    _parse_date,
-    _rows_for_scope,
-    _sum_rows,
     breaches,
     collect_covenant_inputs,
     compute_covenant_metric,
+    describe_leg_breakdown,
 )
 from agent.parsing.numbers import round_half_up
 from eval.score import score_cell
@@ -579,29 +576,47 @@ def _ledger_rows(work_dir: Path) -> list[dict[str, Any]]:
 
 
 
-def _leg_rows(
-    covenant: dict[str, Any],
-    ledger: list[dict[str, Any]],
+def _print_leg_breakdown(
+    breakdown,
     *,
-    leg: str,
+    covenant: dict[str, Any],
     parties: dict[str, Any] | None,
-) -> list[dict[str, Any]]:
-    metric = covenant["metric"]
-    spec = metric["numerator"] if leg == "numerator" else metric.get("denominator")
-    if spec is None:
-        return []
-    period = (_parse_date(covenant["period"][0]), _parse_date(covenant["period"][1]))
-    scope = metric.get("scope", "BORROWER")
-    scenario_id = covenant["scenario_id"]
-    leg_ledger = _rows_for_scope(ledger, scenario_id=scenario_id, scope=scope)
-    group_scope = scope == "GROUP" and leg == "numerator"
-    return _filter_rows(
-        leg_ledger,
-        spec,
-        period=period,
-        parties=parties,
-        group_scope=group_scope,
+) -> None:
+    print(
+        f"  {breakdown.kind} ({breakdown.row_count} rows, "
+        f"categories={breakdown.category_count}, subtotal={breakdown.value}):"
     )
+    if breakdown.flags:
+        print(f"    flags: {', '.join(breakdown.flags)}")
+    if breakdown.category_count > 3:
+        print(
+            f"    review: leg spans {breakdown.category_count} categories "
+            f"({', '.join(breakdown.categories)})"
+        )
+    if breakdown.kind == "derived":
+        print(f"    expression: {breakdown.expression}")
+        for label, amount in breakdown.terms:
+            print(f"      {label}: {amount}")
+        return
+    if breakdown.kind == "document":
+        print(f"    expression: {breakdown.expression}")
+        for label, amount in breakdown.terms:
+            print(f"      {label}: {amount}")
+        return
+    if breakdown.kind == "empty":
+        if "EMPTY_CATEGORY_SPEC" in breakdown.flags:
+            print("    (empty CategorySpec — extraction failure)")
+        else:
+            print("    (no matching rows)")
+        return
+    for row in breakdown.rows:
+        amount = row.get("amount_usd")
+        why_inputs = collect_covenant_inputs(covenant, [row], parties=parties)
+        why = why_inputs[0].get("why", "matched") if why_inputs else "matched"
+        print(
+            f"    {row.get('txn_id')}: amount={amount} "
+            f"counterparty={row.get('counterparty')!r} reason={why}",
+        )
 
 
 def print_cell_breakdown(work_dir: Path, scenario_id: str, slot: str) -> None:
@@ -630,26 +645,26 @@ def print_cell_breakdown(work_dir: Path, scenario_id: str, slot: str) -> None:
         spec = metric["numerator"] if leg == "numerator" else metric.get("denominator")
         if spec is None:
             continue
-        rows = _leg_rows(covenant, ledger, leg=leg, parties=parties)
-        leg_totals[leg] = _sum_rows(rows)
-        print(f"  {leg} ({len(rows)} rows, subtotal={leg_totals[leg]}):")
-        if not rows:
-            print("    (none)")
-            continue
-        for row in rows:
-            amount = row.get("amount_usd")
-            why_inputs = collect_covenant_inputs(covenant, [row], parties=parties)
-            why = why_inputs[0].get("why", "matched") if why_inputs else "matched"
-            print(
-                f"    {row.get('txn_id')}: amount={amount} "
-                f"counterparty={row.get('counterparty')!r} reason={why}",
-            )
+        breakdown = describe_leg_breakdown(
+            covenant,
+            ledger,
+            leg=leg,
+            parties=parties,
+            adjustments=adjustments,
+            work_dir=work_dir,
+        )
+        leg_totals[leg] = breakdown.value
+        print(f"  {leg}:")
+        _print_leg_breakdown(breakdown, covenant=covenant, parties=parties)
 
+    metric_metadata: dict[str, Any] = {}
     actual = compute_covenant_metric(
         covenant,
         ledger,
         parties=parties,
         adjustments=adjustments,
+        work_dir=work_dir,
+        metadata=metric_metadata,
     )
     kind = metric.get("kind", "SUM")
     if kind == "RATIO" and "denominator" in leg_totals:
@@ -669,6 +684,10 @@ def print_cell_breakdown(work_dir: Path, scenario_id: str, slot: str) -> None:
     direction = covenant["direction"]
     status = "BREACH" if breaches(actual, direction, threshold) else "COMPLIANT"
     print(f"  verdict: {status} ({direction} {threshold})")
+    if metric_metadata.get("flags"):
+        print(f"  metric flags: {', '.join(metric_metadata['flags'])}")
+    if metric_metadata.get("strategy"):
+        print(f"  strategy: {metric_metadata['strategy']}")
 
 
 def run_reference_checks(work_dir: Path) -> None:

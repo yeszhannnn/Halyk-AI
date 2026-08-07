@@ -34,7 +34,6 @@ FINANCING_MARKERS = (
     "drawdown",
     "facility drawdown",
     "lease incentive received",
-    "interest rebate on early repayment",
 )
 
 

@@ -2,14 +2,46 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
+from agent.metrics.group_figures import resolve_group_figure
 from agent.parsing.categories import OPEX_SLUGS
 from agent.stages.s4b_parties import normalize_counterparty
 
 ZERO = Decimal("0")
+EMPTY_CATEGORY_SPEC = "EMPTY_CATEGORY_SPEC"
+GROUP_FIGURE_NOT_FOUND = "GROUP_FIGURE_NOT_FOUND"
+WIDE_LEG_REVIEW = "WIDE_LEG_REVIEW"
+SCENARIO_SCOPE_VIOLATION = "SCENARIO_SCOPE_VIOLATION"
+
+FUNDING_EXCLUSION_MARKERS = (
+    "refund",
+    "credit received",
+    "rebate",
+    "reversal",
+    "recovery",
+    "reimbursement",
+    "deposit returned",
+    "deposit refunded",
+    "overbilling refund",
+    "overpayment refunded",
+    "tax assessment reversal",
+    "tax overpayment refunded",
+    "tax credit received",
+    "experience refund",
+    "broker rebate",
+    "free period credit",
+    "utility rebate",
+    "utility deposit returned",
+    "insurance claim reimbursement",
+    "insurance deductible recovery",
+    "payroll advance recovered",
+    "interest on escrow",
+)
 
 
 def _d(value: Any) -> Decimal:
@@ -110,8 +142,50 @@ def _rows_for_scope(
     scope: str,
 ) -> list[dict[str, Any]]:
     if scope == "GROUP":
-        return ledger
+        return [row for row in ledger if row.get("scenario_id") == scenario_id]
     return [row for row in ledger if row.get("scenario_id") == scenario_id]
+
+
+def _is_excluded_inflow(description: str) -> bool:
+    text = str(description or "").casefold()
+    return any(marker in text for marker in FUNDING_EXCLUSION_MARKERS)
+
+
+def _assert_leg_scenario(
+    rows: list[dict[str, Any]],
+    *,
+    scenario_id: str,
+    leg: str,
+) -> None:
+    for row in rows:
+        row_scenario = row.get("scenario_id")
+        if row_scenario is None:
+            continue
+        if row_scenario != scenario_id:
+            txn_id = row.get("txn_id") or row.get("adjustment_ref") or "?"
+            raise ValueError(
+                f"{SCENARIO_SCOPE_VIOLATION}: {leg} leg for {scenario_id} "
+                f"includes row {txn_id} from {row_scenario}"
+            )
+
+
+@dataclass
+class LegBreakdown:
+    kind: str
+    value: Decimal
+    rows: list[dict[str, Any]] = field(default_factory=list)
+    expression: str | None = None
+    terms: list[tuple[str, Decimal]] = field(default_factory=list)
+    flags: list[str] = field(default_factory=list)
+    categories: list[str] = field(default_factory=list)
+
+    @property
+    def row_count(self) -> int:
+        return len(self.rows)
+
+    @property
+    def category_count(self) -> int:
+        return len(self.categories)
 
 
 def _effective_category(row: dict[str, Any], apply_reclass: bool) -> str:
@@ -154,7 +228,7 @@ def _keyword_matches(
         return False
 
     if key in {"выручка", "выручки"}:
-        return category == "revenue"
+        return category == "revenue" and not _is_excluded_inflow(str(row.get("description") or ""))
 
     if key in {"процентные расходы"}:
         return category == "interest"
@@ -192,14 +266,14 @@ def _keyword_matches(
     if key in {"арендных платежей"}:
         return category == "rent"
 
+    if key in {"операционных и капитальных затрат"}:
+        return category in {"opex", "capex"}
+
     if key in {"операционных расходов"}:
         return category == "opex"
 
-    if key in {"операционных и капитальных затрат"}:
-        return category in OPEX_SLUGS or category == "capex"
-
     if key in {"поступления по финансированию", "поступлений по финансированию"}:
-        return category == "financing"
+        return category == "financing" and not _is_excluded_inflow(str(row.get("description") or ""))
 
     if key in {
         "платежи",
@@ -430,6 +504,181 @@ def _special_metric(
     return None
 
 
+def _leg_categories(rows: list[dict[str, Any]], spec: dict[str, Any]) -> list[str]:
+    return sorted(
+        {
+            _effective_category(row, bool(spec.get("apply_reclass", True)))
+            for row in rows
+        }
+    )
+
+
+def _record_leg_metadata(
+    metadata: dict[str, Any] | None,
+    *,
+    leg: str,
+    breakdown: LegBreakdown,
+) -> None:
+    if metadata is None:
+        return
+    legs = metadata.setdefault("legs", {})
+    legs[leg] = {
+        "kind": breakdown.kind,
+        "value": str(breakdown.value),
+        "row_count": breakdown.row_count,
+        "category_count": breakdown.category_count,
+        "categories": breakdown.categories,
+        "flags": breakdown.flags,
+        "expression": breakdown.expression,
+        "terms": [(label, str(amount)) for label, amount in breakdown.terms],
+    }
+    flags = metadata.setdefault("flags", [])
+    for flag in breakdown.flags:
+        if flag not in flags:
+            flags.append(flag)
+    if breakdown.category_count > 3:
+        if WIDE_LEG_REVIEW not in flags:
+            flags.append(WIDE_LEG_REVIEW)
+
+
+def _ebitda_breakdown(
+    ledger: list[dict[str, Any]],
+    *,
+    period: tuple[date, date],
+    apply_reclass: bool,
+    addbacks: Decimal,
+    label: str,
+) -> LegBreakdown:
+    revenue_spec = {
+        "include_keywords": ["Выручка"],
+        "exclude_keywords": [],
+        "sign": "INFLOW",
+        "apply_reclass": apply_reclass,
+    }
+    opex_spec = {
+        "include_keywords": ["Операционных расходов"],
+        "exclude_keywords": [],
+        "sign": "OUTFLOW",
+        "apply_reclass": apply_reclass,
+    }
+    revenue_rows = _filter_rows(ledger, revenue_spec, period=period, parties=None)
+    opex_rows = _filter_rows(ledger, opex_spec, period=period, parties=None)
+    revenue = _sum_rows(revenue_rows)
+    opex = _sum_rows(opex_rows)
+    value = revenue - opex + addbacks
+    terms: list[tuple[str, Decimal]] = [
+        ("revenue", revenue),
+        ("opex", -opex),
+    ]
+    if addbacks != ZERO:
+        terms.append(("addbacks", addbacks))
+    expression = label
+    if addbacks != ZERO:
+        expression = f"{label} = revenue - opex + addbacks"
+    else:
+        expression = f"{label} = revenue - opex"
+    return LegBreakdown(
+        kind="derived",
+        value=value,
+        expression=expression,
+        terms=terms,
+        categories=sorted({row.get("category", "other") for row in revenue_rows + opex_rows}),
+    )
+
+
+def _leg_breakdown(
+    ledger: list[dict[str, Any]],
+    spec: dict[str, Any] | None,
+    *,
+    period: tuple[date, date],
+    parties: dict[str, Any] | None,
+    adjustments: dict[str, Any],
+    scenario_id: str,
+    leg: str,
+    metric: dict[str, Any],
+    full_ledger: list[dict[str, Any]],
+    work_dir: Path | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> LegBreakdown:
+    if spec is None:
+        return LegBreakdown(kind="empty", value=ZERO)
+
+    include_keywords = spec.get("include_keywords") or []
+    flags: list[str] = []
+    if not include_keywords:
+        flags.append(EMPTY_CATEGORY_SPEC)
+        breakdown = LegBreakdown(kind="empty", value=ZERO, flags=flags)
+        _record_leg_metadata(metadata, leg=leg, breakdown=breakdown)
+        return breakdown
+
+    scope = metric.get("scope", "BORROWER")
+    effective_scope = scope if leg == "numerator" else "BORROWER"
+    leg_ledger = _rows_for_scope(full_ledger, scenario_id=scenario_id, scope=effective_scope)
+    group_scope = scope == "GROUP" and leg == "numerator"
+    keywords = [k.casefold() for k in include_keywords]
+
+    if leg == "numerator" and scope == "GROUP" and group_scope:
+        group_value, source = resolve_group_figure(
+            scenario_id=scenario_id,
+            include_keywords=include_keywords,
+            work_dir=work_dir,
+        )
+        if group_value is not None:
+            breakdown = LegBreakdown(
+                kind="document",
+                value=group_value,
+                expression=f"group figure from {source}",
+                terms=[(f"group:{source}", group_value)],
+                flags=flags,
+            )
+            _record_leg_metadata(metadata, leg=leg, breakdown=breakdown)
+            return breakdown
+        flags.append(GROUP_FIGURE_NOT_FOUND)
+        if metadata is not None:
+            metadata["strategy"] = "group_scope_borrower_fallback"
+
+    if any("ebitda" in k for k in keywords):
+        addbacks = ZERO
+        if "скорректированная" in _metric_notes(metric.get("notes", "")):
+            addbacks = _addback_total(adjustments, scenario_id)
+        borrower_ledger = _rows_for_scope(full_ledger, scenario_id=scenario_id, scope="BORROWER")
+        label = "adjusted EBITDA" if addbacks != ZERO else "EBITDA"
+        breakdown = _ebitda_breakdown(
+            borrower_ledger,
+            period=period,
+            apply_reclass=bool(spec.get("apply_reclass", True)),
+            addbacks=addbacks if leg == "numerator" else ZERO,
+            label=label,
+        )
+        breakdown.flags.extend(flags)
+        _record_leg_metadata(metadata, leg=leg, breakdown=breakdown)
+        return breakdown
+
+    rows = _filter_rows(
+        leg_ledger,
+        spec,
+        period=period,
+        parties=parties,
+        group_scope=group_scope,
+    )
+    _assert_leg_scenario(rows, scenario_id=scenario_id, leg=leg)
+    categories = _leg_categories(rows, spec)
+    value = _sum_rows(rows)
+    if leg == "denominator" and any("выручка" in k for k in keywords):
+        value += _addback_total(adjustments, scenario_id)
+
+    kind = "rows" if rows else "empty"
+    breakdown = LegBreakdown(
+        kind=kind,
+        value=value,
+        rows=rows,
+        categories=categories,
+        flags=flags,
+    )
+    _record_leg_metadata(metadata, leg=leg, breakdown=breakdown)
+    return breakdown
+
+
 def _leg_value(
     ledger: list[dict[str, Any]],
     spec: dict[str, Any] | None,
@@ -441,44 +690,54 @@ def _leg_value(
     leg: str,
     metric: dict[str, Any],
     full_ledger: list[dict[str, Any]],
+    work_dir: Path | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> Decimal:
-    if spec is None:
-        return ZERO
-    scope = metric.get("scope", "BORROWER")
-    leg_ledger = _rows_for_scope(full_ledger, scenario_id=scenario_id, scope=scope if leg == "numerator" else "BORROWER")
-    group_scope = scope == "GROUP" and leg == "numerator"
-    keywords = [k.casefold() for k in spec.get("include_keywords") or []]
-    if leg == "numerator" and any("ebitda" in k for k in keywords):
-        addbacks = ZERO
-        if "скорректированная" in _metric_notes(metric.get("notes", "")):
-            addbacks = _addback_total(adjustments, scenario_id)
-        borrower_ledger = _rows_for_scope(full_ledger, scenario_id=scenario_id, scope="BORROWER")
-        return _compute_ebitda(
-            borrower_ledger,
-            period=period,
-            apply_reclass=bool(spec.get("apply_reclass", True)),
-            addbacks=addbacks,
-        )
-    if leg == "denominator" and any("ebitda" in k for k in keywords):
-        borrower_ledger = _rows_for_scope(full_ledger, scenario_id=scenario_id, scope="BORROWER")
-        return _compute_ebitda(
-            borrower_ledger,
-            period=period,
-            apply_reclass=bool(spec.get("apply_reclass", True)),
-            addbacks=ZERO,
-        )
-    total = _sum_rows(
-        _filter_rows(
-            leg_ledger,
-            spec,
-            period=period,
-            parties=parties,
-            group_scope=group_scope,
-        )
+    return _leg_breakdown(
+        ledger,
+        spec,
+        period=period,
+        parties=parties,
+        adjustments=adjustments,
+        scenario_id=scenario_id,
+        leg=leg,
+        metric=metric,
+        full_ledger=full_ledger,
+        work_dir=work_dir,
+        metadata=metadata,
+    ).value
+
+
+def describe_leg_breakdown(
+    covenant: dict[str, Any],
+    ledger: list[dict[str, Any]],
+    *,
+    leg: str,
+    parties: dict[str, Any] | None = None,
+    adjustments: dict[str, Any] | None = None,
+    work_dir: Path | None = None,
+) -> LegBreakdown:
+    """Return a structured breakdown for diagnose --cell."""
+    adjustments = adjustments or {}
+    scenario_id = covenant["scenario_id"]
+    period = (_parse_date(covenant["period"][0]), _parse_date(covenant["period"][1]))
+    metric = covenant["metric"]
+    spec = metric["numerator"] if leg == "numerator" else metric.get("denominator")
+    if leg == "denominator" and metric.get("kind") == "RATIO":
+        metric = {**metric, "scope": "BORROWER"}
+    scenario_ledger = [row for row in ledger if row.get("scenario_id") == scenario_id]
+    return _leg_breakdown(
+        scenario_ledger,
+        spec,
+        period=period,
+        parties=parties,
+        adjustments=adjustments,
+        scenario_id=scenario_id,
+        leg=leg,
+        metric=metric,
+        full_ledger=ledger,
+        work_dir=work_dir,
     )
-    if leg == "denominator" and any("выручка" in k for k in keywords):
-        total += _addback_total(adjustments, scenario_id)
-    return total
 
 
 def compute_covenant_metric(
@@ -487,6 +746,8 @@ def compute_covenant_metric(
     *,
     parties: dict[str, Any] | None = None,
     adjustments: dict[str, Any] | None = None,
+    work_dir: Path | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> Decimal:
     """Compute the covenant metric at full Decimal precision."""
     adjustments = adjustments or {}
@@ -516,6 +777,8 @@ def compute_covenant_metric(
             leg="numerator",
             metric=metric,
             full_ledger=ledger,
+            work_dir=work_dir,
+            metadata=metadata,
         )
 
     numerator = _leg_value(
@@ -528,6 +791,8 @@ def compute_covenant_metric(
         leg="numerator",
         metric=metric,
         full_ledger=ledger,
+        work_dir=work_dir,
+        metadata=metadata,
     )
     denominator = _leg_value(
         scenario_ledger,
@@ -539,6 +804,8 @@ def compute_covenant_metric(
         leg="denominator",
         metric={**metric, "scope": "BORROWER"},
         full_ledger=ledger,
+        work_dir=work_dir,
+        metadata=metadata,
     )
     if denominator == ZERO:
         return ZERO
@@ -588,7 +855,7 @@ def collect_covenant_inputs(
     seen: set[str | None] = set()
 
     for row in ledger:
-        if scope == "BORROWER" and row.get("scenario_id") != scenario_id:
+        if row.get("scenario_id") != scenario_id:
             continue
         if row.get("excluded"):
             continue

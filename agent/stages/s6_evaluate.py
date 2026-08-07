@@ -58,6 +58,7 @@ def _evaluate_cell(
     parties: dict[str, Any] | None,
     adjustments: dict[str, Any],
     adjusted_txn_ids: set[str],
+    work_dir: Path,
 ) -> dict[str, Any]:
     slot = covenant["slot"]
     threshold = Decimal(str(covenant["threshold"]))
@@ -67,13 +68,19 @@ def _evaluate_cell(
     springing = covenant.get("springing")
 
     try:
+        metric_metadata: dict[str, Any] = {}
         actual = compute_covenant_metric(
             covenant,
             ledger,
             parties=parties,
             adjustments=adjustments,
+            work_dir=work_dir,
+            metadata=metric_metadata,
         )
         computed = True
+        if metric_metadata.get("strategy"):
+            strategy = str(metric_metadata["strategy"])
+        flags.extend(metric_metadata.get("flags") or [])
     except Exception:
         actual = threshold
         computed = False
@@ -94,6 +101,7 @@ def _evaluate_cell(
                 ledger,
                 parties=parties,
                 adjustments=adjustments,
+                work_dir=work_dir,
             )
             if not compare_values(
                 trigger_value,
@@ -162,6 +170,7 @@ def run(*, work_dir: Path) -> StageResult:
             parties=parties_by_scenario.get(covenant["scenario_id"]),
             adjustments=adjustments,
             adjusted_txn_ids=adjusted_ids,
+            work_dir=work_dir,
         )
         for covenant in covenants
     ]
