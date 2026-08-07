@@ -38,12 +38,42 @@ class CategorySign(str, Enum):
 def _uppercase_str(value: Any) -> Any:
     if isinstance(value, str):
         upper = value.upper()
-        if upper == "OUTFLOWS":
+        if upper in {"OUTFLOWS", "NEGATIVE", "OUTFLOW"}:
             return "OUTFLOW"
-        if upper == "INFLOWS":
+        if upper in {"INFLOWS", "POSITIVE", "INFLOW"}:
             return "INFLOW"
+        if upper in {"VALUE", "BOTH", "ABSOLUTE"}:
+            return "BOTH"
         return upper
     return value
+
+
+def _parse_decimal_field(value: Any, *, field_name: str) -> Decimal:
+    if isinstance(value, Decimal):
+        return value
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be numeric")
+    if isinstance(value, int):
+        return Decimal(value)
+    if isinstance(value, float):
+        return Decimal(str(value))
+    if isinstance(value, str):
+        cleaned = value.strip().replace(",", "").replace(" ", "")
+        if not cleaned:
+            raise ValueError(f"{field_name} must not be empty")
+        return Decimal(cleaned)
+    raise ValueError(f"{field_name} must be numeric, got {type(value).__name__}")
+
+
+def _parse_date_field(value: Any, *, field_name: str) -> date:
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError(f"{field_name} must not be empty")
+        return date.fromisoformat(cleaned)
+    raise ValueError(f"{field_name} must be an ISO date string, got {type(value).__name__}")
 
 
 class CategorySpecExtract(BaseModel):
@@ -122,10 +152,10 @@ class SpringingConditionExtract(BaseModel):
 
     @field_validator("value", mode="before")
     @classmethod
-    def _coerce_value(cls, value: Any) -> Any:
-        if isinstance(value, (int, float, str)):
-            return Decimal(str(value))
-        return value
+    def _parse_value(cls, value: Any) -> Any:
+        if value is None:
+            return value
+        return _parse_decimal_field(value, field_name="springing.value")
 
 
 class CovenantExtract(BaseModel):
@@ -179,17 +209,13 @@ class CovenantExtract(BaseModel):
 
     @field_validator("threshold", mode="before")
     @classmethod
-    def _coerce_threshold(cls, value: Any) -> Any:
-        if isinstance(value, (int, float)):
-            return Decimal(str(value))
-        return value
+    def _parse_threshold(cls, value: Any) -> Any:
+        return _parse_decimal_field(value, field_name="threshold")
 
     @field_validator("period_start", "period_end", mode="before")
     @classmethod
-    def _coerce_period_date(cls, value: Any) -> Any:
-        if isinstance(value, str):
-            return date.fromisoformat(value)
-        return value
+    def _parse_period_dates(cls, value: Any) -> Any:
+        return _parse_date_field(value, field_name="period")
 
     @model_validator(mode="before")
     @classmethod

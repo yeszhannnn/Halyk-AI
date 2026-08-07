@@ -194,11 +194,19 @@ def run(*, work_dir: Path) -> StageResult:
         "summary": {
             "count": len(findings),
             "breach_count": sum(1 for f in findings if f["status"] == "BREACH"),
+            "empty_leg_count": sum(
+                1 for finding in findings if "EMPTY_LEG" in (finding.get("flags") or [])
+            ),
         },
     }
     (work_dir / "06_evaluated.json").write_text(
         json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
+    )
+
+    print(
+        f"s6_evaluate: cells={len(findings)} breaches={payload['summary']['breach_count']} "
+        f"empty_legs={payload['summary']['empty_leg_count']}",
     )
 
     return StageResult(item_count=len(findings), row_count=len(findings))

@@ -5,7 +5,7 @@
     "direction": "MIN",
     "direction_quote": "не менее",
     "threshold": "7100000",
-    "threshold_quote": "не менее $7,100,000.00",
+    "threshold_quote": "$7,100,000.00",
     "threshold_unit": "USD",
     "threshold_unit_quote": "$",
     "metric": {
@@ -38,8 +38,8 @@
   },
   "usage": {
     "prompt_tokens": 1526,
-    "completion_tokens": 258,
-    "total_tokens": 1784
+    "completion_tokens": 256,
+    "total_tokens": 1782
   },
-  "cost_usd": "0.0003837"
+  "cost_usd": "0.0003825"
 }

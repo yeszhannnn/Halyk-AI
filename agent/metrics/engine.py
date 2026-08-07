@@ -14,6 +14,7 @@ from agent.stages.s4b_parties import normalize_counterparty
 
 ZERO = Decimal("0")
 EMPTY_CATEGORY_SPEC = "EMPTY_CATEGORY_SPEC"
+EMPTY_LEG = "EMPTY_LEG"
 GROUP_FIGURE_NOT_FOUND = "GROUP_FIGURE_NOT_FOUND"
 WIDE_LEG_REVIEW = "WIDE_LEG_REVIEW"
 SCENARIO_SCOPE_VIOLATION = "SCENARIO_SCOPE_VIOLATION"
@@ -785,6 +786,17 @@ def _leg_breakdown(
     value = _sum_rows(rows)
 
     kind = "rows" if rows else "empty"
+    if kind == "empty" and include_keywords and EMPTY_LEG not in flags:
+        flags.append(EMPTY_LEG)
+        if metadata is not None:
+            metadata.setdefault("empty_legs", []).append(
+                {
+                    "scenario_id": scenario_id,
+                    "slot": slot,
+                    "leg": leg,
+                    "keywords": list(include_keywords),
+                },
+            )
     breakdown = LegBreakdown(
         kind=kind,
         value=value,

@@ -12,6 +12,13 @@ class EbitdaAddbackRowExtract(BaseModel):
     counterparty_quote: str = Field(description="Verbatim quote containing the counterparty name.")
     amount: Decimal = Field(description="Row amount in USD.")
     amount_quote: str = Field(description="Verbatim quote containing the row amount.")
+    included_in_addback: bool | None = Field(
+        default=None,
+        description=(
+            "Optional model indication of whether this row is above the materiality floor. "
+            "Leave null when not stated."
+        ),
+    )
 
 
 class AdjustmentExtract(BaseModel):

@@ -11,7 +11,13 @@ from typing import Any
 
 import pandas as pd
 
-from agent.shape import OPEN_OCR_PAGE_COUNT, OPEN_SCENARIO_COUNT, OPEN_SLOTS, shape_warnings
+from agent.shape import (
+    OPEN_OCR_PAGE_COUNT,
+    OPEN_SCENARIO_COUNT,
+    OPEN_SLOTS,
+    _format_conflict,
+    shape_warnings,
+)
 from agent.stages import s1_ingest, s2_classify, s3_bind
 from agent.template import load_template, template_scenarios, template_slots
 
@@ -101,9 +107,10 @@ def _parse_threshold(value: str) -> Decimal | None:
 def _distinct_kyc_thresholds(
     inventory: dict[str, Any],
     bound: dict[str, Any],
-) -> list[str]:
+) -> tuple[list[str], int]:
     thresholds: set[Decimal] = set()
-    for scenario_id, record in sorted((bound.get("scenarios") or {}).items()):
+    unreadable_dossiers = 0
+    for _scenario_id, record in sorted((bound.get("scenarios") or {}).items()):
         doc_id = record.get("kyc")
         if not doc_id:
             continue
@@ -111,12 +118,32 @@ def _distinct_kyc_thresholds(
         if not doc:
             continue
         text = "\n".join(doc.get("pages") or [])
+        found = False
         for pattern in (KYC_THRESHOLD_PATTERN, PERIMETER_THRESHOLD_PATTERN):
             for match in pattern.finditer(text):
                 threshold = _parse_threshold(match.group(1))
                 if threshold is not None:
                     thresholds.add(threshold)
-    return [format(value.normalize(), "f") for value in sorted(thresholds)]
+                    found = True
+        if not found:
+            unreadable_dossiers += 1
+    return [format(value.normalize(), "f") for value in sorted(thresholds)], unreadable_dossiers
+
+
+def _collect_conflicts(
+    classified: dict[str, Any],
+    bound: dict[str, Any],
+) -> list[dict[str, Any]]:
+    conflicts: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for source in (classified.get("conflicts") or [], bound.get("conflicts") or []):
+        for conflict in source:
+            key = json.dumps(conflict, sort_keys=True, ensure_ascii=False)
+            if key in seen:
+                continue
+            seen.add(key)
+            conflicts.append(conflict)
+    return conflicts
 
 
 def run_preflight(input_dir: Path) -> dict[str, Any]:
@@ -149,7 +176,8 @@ def run_preflight(input_dir: Path) -> dict[str, Any]:
     missing_kyc = _missing_bindings(bound, "kyc")
     missing_audit = _missing_bindings(bound, "audit_notes")
     multiple_loans = _multiple_active_loans(bound)
-    kyc_thresholds = _distinct_kyc_thresholds(inventory, bound)
+    kyc_thresholds, unreadable_kyc_thresholds = _distinct_kyc_thresholds(inventory, bound)
+    conflicts = _collect_conflicts(classified, bound)
 
     report = {
         "scenario_count": len(scenarios),
@@ -167,6 +195,9 @@ def run_preflight(input_dir: Path) -> dict[str, Any]:
         "missing_audit": missing_audit,
         "multiple_active_loans": multiple_loans,
         "kyc_thresholds": kyc_thresholds,
+        "kyc_thresholds_text_layer_only": True,
+        "unreadable_kyc_thresholds": unreadable_kyc_thresholds,
+        "conflicts": conflicts,
         "warnings": shape_warnings(
             scenario_count=len(scenarios),
             slots=slots,
@@ -175,6 +206,8 @@ def run_preflight(input_dir: Path) -> dict[str, Any]:
             missing_loans=missing_loan,
             missing_kyc=missing_kyc,
             missing_audit=missing_audit,
+            conflicts=conflicts,
+            multiple_active_loans=multiple_loans,
         ),
     }
     return report
@@ -220,11 +253,27 @@ def print_preflight_report(report: dict[str, Any]) -> None:
     else:
         print("multiple active loans: none")
 
-    thresholds = report.get("kyc_thresholds") or []
-    if thresholds:
-        print(f"kyc thresholds: {', '.join(thresholds)}")
+    conflicts = report.get("conflicts") or []
+    if conflicts:
+        print("conflicts:")
+        for conflict in conflicts:
+            print(f"  - {_format_conflict(conflict)}")
     else:
-        print("kyc thresholds: none found in text")
+        print("conflicts: none")
+
+    thresholds = report.get("kyc_thresholds") or []
+    unreadable = int(report.get("unreadable_kyc_thresholds") or 0)
+    if thresholds:
+        threshold_list = ", ".join(thresholds)
+        print(
+            "kyc thresholds (text-layer only): "
+            f"{threshold_list} ({unreadable} dossiers unreadable at this stage)",
+        )
+    else:
+        print(
+            "kyc thresholds (text-layer only): none found in text "
+            f"({unreadable} dossiers unreadable at this stage)",
+        )
 
     warnings = report.get("warnings") or []
     if warnings:

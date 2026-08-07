@@ -257,7 +257,21 @@ def _is_transport_error(exc: Exception) -> bool:
     return isinstance(exc, (RateLimitError, APIConnectionError, APITimeoutError))
 
 
+def _is_rate_limited(exc: Exception) -> bool:
+    if isinstance(exc, RateLimitError):
+        return True
+    if isinstance(exc, InstructorRetryException):
+        if isinstance(exc.__cause__, RateLimitError):
+            return True
+        message = str(exc).casefold()
+        if "rate limit" in message or "429" in message:
+            return True
+    return False
+
+
 def _is_validation_error(exc: Exception) -> bool:
+    if _is_rate_limited(exc):
+        return False
     return isinstance(
         exc,
         (
@@ -304,7 +318,17 @@ class LLMClient:
         self.counter = counter or RUN_COUNTER
         self._semaphore = semaphore or asyncio.Semaphore(MAX_CONCURRENT)
         self.model = model or MODEL_ID
-        self._client = instructor.from_openai(AsyncOpenAI(max_retries=0))
+        self._openai = AsyncOpenAI(max_retries=0)
+        self._client = instructor.from_openai(self._openai)
+
+    async def aclose(self) -> None:
+        await self._openai.close()
+
+    async def __aenter__(self) -> LLMClient:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        await self.aclose()
 
     async def _request_with_retries(
         self,
@@ -333,7 +357,9 @@ class LLMClient:
                 if _is_validation_error(exc):
                     message, raw = _format_validation_failure(exc)
                     raise LLMValidationError(message, raw_output=raw) from exc
-                if transport_attempt >= MAX_TRANSPORT_RETRIES or not _is_transport_error(exc):
+                if transport_attempt >= MAX_TRANSPORT_RETRIES or not (
+                    _is_transport_error(exc) or _is_rate_limited(exc)
+                ):
                     break
                 await _sleep_with_backoff(transport_attempt, exc)
 
@@ -437,11 +463,11 @@ class LLMClient:
                     ),
                 },
             ]
+            retry_params = {**params, "use_cache": False}
             result = await self.complete(
                 response_model=response_model,
                 messages=retry_messages,
-                use_cache=False,
-                **params,
+                **retry_params,
             )
             payload = result.model_dump(mode="python")
             apply_quote_verification_with_retry(

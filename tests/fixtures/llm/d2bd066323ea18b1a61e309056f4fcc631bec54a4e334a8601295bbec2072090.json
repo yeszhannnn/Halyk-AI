@@ -1,22 +1,22 @@
 {
   "response": {
     "title": "Minimum Cover of Applications by Sources",
-    "title_quote": "Minimum Cover of Applications by Sources",
+    "title_quote": "Пункт 6.1 Minimum Cover of Applications by Sources.",
     "direction": "MIN",
     "direction_quote": "не менее",
-    "threshold": "1.2",
+    "threshold": "1.20",
     "threshold_quote": "1.20x",
     "threshold_unit": "RATIO",
     "threshold_unit_quote": "x",
     "metric": {
       "kind": "RATIO",
-      "kind_quote": "отношение суммы выручки и поступлений по финансированию Заёмщика к сумме операционных и капитальных затрат",
+      "kind_quote": "Отношение суммы выручки и поступлений по финансированию Заёмщика к сумме операционных и капитальных затрат",
       "numerator": {
         "include_keywords": [
           "выручки",
           "поступлений"
         ],
-        "include_keywords_quote": "суммы выручки и поступлений",
+        "include_keywords_quote": "суммы выручки и поступлений по финансированию Заёмщика",
         "exclude_keywords": [],
         "exclude_keywords_quote": "",
         "sign": "INFLOW",
@@ -44,16 +44,16 @@
       "notes_quote": ""
     },
     "notes": "Отношение суммы выручки и поступлений по финансированию Заёмщика к сумме операционных и капитальных затрат",
-    "notes_quote": "отношение суммы выручки и поступлений по финансированию Заёмщика к сумме операционных и капитальных затрат",
+    "notes_quote": "Отношение суммы выручки и поступлений по финансированию Заёмщика к сумме операционных и капитальных затрат",
     "period_start": "2025-01-01",
     "period_end": "2025-12-31",
     "period_quote": "за период с 2025-01-01 по 2025-12-31",
     "springing": null
   },
   "usage": {
-    "prompt_tokens": 3357,
-    "completion_tokens": 630,
-    "total_tokens": 3987
+    "prompt_tokens": 1477,
+    "completion_tokens": 330,
+    "total_tokens": 1807
   },
-  "cost_usd": "0.00088155"
+  "cost_usd": "0.00041955"
 }

@@ -45,6 +45,13 @@ python -m agent --input data/open --out submission.json --force   # ignore cache
 python eval/score.py submission.json eval/ground_truth.json       # score against a key
 ```
 
+After any prompt or schema change, re-record the mini-dataset LLM replay fixtures
+(offline tests depend on them):
+
+```bash
+python scripts/record_mini_llm_fixtures.py
+```
+
 ---
 
 ## How it works

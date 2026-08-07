@@ -32,6 +32,10 @@ EXPECTED_YEAR = 2025
 COVENANT_YEAR = (date(2025, 1, 1), date(2025, 12, 31))
 SLOTS = ("1", "2", "3")
 EXTRACTOR = "s4a_covenants"
+THRESHOLD_RATIO_MAX = Decimal("1000")
+THRESHOLD_USD_MIN = Decimal("1000")
+ZERO_THRESHOLD_MARKERS = ("0", "0.0", "0,0", "ноль", "zero")
+MAX_INVALID_COVENANT_FRACTION = Decimal("0.2")
 
 SYSTEM_PROMPT = """You extract bank loan financial covenants from Russian/English contract text.
 
@@ -382,6 +386,180 @@ def _placeholder_covenant(scenario_id: str, slot: str) -> dict[str, Any]:
     }
 
 
+def _quote_states_zero_threshold(quote: str) -> bool:
+    normalized = " ".join(quote.casefold().split())
+    return any(marker in normalized for marker in ZERO_THRESHOLD_MARKERS)
+
+
+def _validate_category_spec(
+    spec: CategorySpecExtract,
+    *,
+    leg: str,
+    scenario_id: str,
+    slot: str,
+) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    if not spec.include_keywords:
+        issues.append(
+            {
+                "kind": "EMPTY_CATEGORY_KEYWORDS",
+                "scenario_id": scenario_id,
+                "slot": f"6.{slot}",
+                "leg": leg,
+            },
+        )
+        return issues
+
+    keywords_text = " ".join(spec.include_keywords).casefold()
+    sign = spec.sign.value
+    if any(token in keywords_text for token in ("капитальн", "capex", "capital expenditure")):
+        if sign != "OUTFLOW":
+            issues.append(
+                {
+                    "kind": "CAPEX_SIGN_MISMATCH",
+                    "scenario_id": scenario_id,
+                    "slot": f"6.{slot}",
+                    "leg": leg,
+                    "sign": sign,
+                },
+            )
+    if any(
+        token in keywords_text
+        for token in ("операционн", "opex", "operating expense", "аренд")
+    ):
+        if sign not in {"OUTFLOW", "BOTH"}:
+            issues.append(
+                {
+                    "kind": "OPEX_SIGN_MISMATCH",
+                    "scenario_id": scenario_id,
+                    "slot": f"6.{slot}",
+                    "leg": leg,
+                    "sign": sign,
+                },
+            )
+    return issues
+
+
+def _validate_covenant_extract(
+    extracted: CovenantExtract,
+    *,
+    scenario_id: str,
+    slot: str,
+) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    threshold = extracted.threshold
+    unit = extracted.threshold_unit.value
+    covenant_key = f"{scenario_id}/6.{slot}"
+
+    if threshold == 0 and not _quote_states_zero_threshold(extracted.threshold_quote):
+        issues.append(
+            {
+                "kind": "ZERO_THRESHOLD",
+                "covenant_key": covenant_key,
+                "scenario_id": scenario_id,
+                "slot": f"6.{slot}",
+                "threshold": _decimal_to_str(threshold),
+                "threshold_quote": extracted.threshold_quote,
+            },
+        )
+
+    if unit == "RATIO" and threshold >= THRESHOLD_RATIO_MAX:
+        issues.append(
+            {
+                "kind": "RATIO_THRESHOLD_TOO_LARGE",
+                "covenant_key": covenant_key,
+                "scenario_id": scenario_id,
+                "slot": f"6.{slot}",
+                "threshold": _decimal_to_str(threshold),
+            },
+        )
+
+    if unit == "USD" and threshold < THRESHOLD_USD_MIN:
+        issues.append(
+            {
+                "kind": "USD_THRESHOLD_TOO_SMALL",
+                "covenant_key": covenant_key,
+                "scenario_id": scenario_id,
+                "slot": f"6.{slot}",
+                "threshold": _decimal_to_str(threshold),
+            },
+        )
+
+    metric_kind = extracted.metric.kind.value
+    if metric_kind == "RATIO" and unit != "RATIO":
+        issues.append(
+            {
+                "kind": "THRESHOLD_UNIT_KIND_MISMATCH",
+                "covenant_key": covenant_key,
+                "scenario_id": scenario_id,
+                "slot": f"6.{slot}",
+                "metric_kind": metric_kind,
+                "threshold_unit": unit,
+            },
+        )
+    if metric_kind in {"SUM", "COUNT"} and unit != "USD":
+        issues.append(
+            {
+                "kind": "THRESHOLD_UNIT_KIND_MISMATCH",
+                "covenant_key": covenant_key,
+                "scenario_id": scenario_id,
+                "slot": f"6.{slot}",
+                "metric_kind": metric_kind,
+                "threshold_unit": unit,
+            },
+        )
+
+    if extracted.springing is not None and extracted.springing.value == threshold:
+        issues.append(
+            {
+                "kind": "SPRINGING_VALUE_EQUALS_THRESHOLD",
+                "covenant_key": covenant_key,
+                "scenario_id": scenario_id,
+                "slot": f"6.{slot}",
+                "threshold": _decimal_to_str(threshold),
+                "springing_value": _decimal_to_str(extracted.springing.value),
+            },
+        )
+
+    issues.extend(
+        _validate_category_spec(
+            extracted.metric.numerator,
+            leg="numerator",
+            scenario_id=scenario_id,
+            slot=slot,
+        ),
+    )
+    if extracted.metric.denominator is not None:
+        issues.extend(
+            _validate_category_spec(
+                extracted.metric.denominator,
+                leg="denominator",
+                scenario_id=scenario_id,
+                slot=slot,
+            ),
+        )
+    if extracted.springing is not None:
+        issues.extend(
+            _validate_category_spec(
+                extracted.springing.metric.numerator,
+                leg="springing_numerator",
+                scenario_id=scenario_id,
+                slot=slot,
+            ),
+        )
+        if extracted.springing.metric.denominator is not None:
+            issues.extend(
+                _validate_category_spec(
+                    extracted.springing.metric.denominator,
+                    leg="springing_denominator",
+                    scenario_id=scenario_id,
+                    slot=slot,
+                ),
+            )
+
+    return issues
+
+
 def _validate_period(
     period: tuple[date, date],
     *,
@@ -426,23 +604,30 @@ async def _extract_covenant_item(
     slot: str,
     item_text: str,
     verification_text: str,
+    validation_feedback: str | None = None,
 ) -> tuple[CovenantExtract, dict[str, bool]]:
+    user_content = (
+        f"Scenario: {scenario_id}\n"
+        f"Slot: 6.{slot}\n\n"
+        "Extract the covenant from this clause text:\n\n"
+        f"{item_text}"
+    )
+    if validation_feedback:
+        user_content += (
+            "\n\nYour prior extraction failed structural validation:\n"
+            f"{validation_feedback}\n"
+            "Return a corrected extraction. Do not swap the covenant threshold with "
+            "the springing trigger value."
+        )
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": (
-                f"Scenario: {scenario_id}\n"
-                f"Slot: 6.{slot}\n\n"
-                "Extract the covenant from this clause text:\n\n"
-                f"{item_text}"
-            ),
-        },
+        {"role": "user", "content": user_content},
     ]
     extracted = await client.complete_verified(
         response_model=CovenantExtract,
         messages=messages,
         quote_checks=lambda result: _quote_checks(result, verification_text),
+        **({"use_cache": False} if validation_feedback else {}),
     )
     payload = extracted.model_dump(mode="python")
     verify_extracted_fields(payload, fields=_quote_checks(extracted, verification_text))
@@ -457,21 +642,69 @@ async def _process_scenario(
     doc_id: str,
     pages: list[str],
     conflicts: list[dict[str, Any]],
-) -> list[tuple[Covenant, dict[str, bool]]]:
+) -> list[tuple[Covenant, dict[str, bool], list[dict[str, Any]]]]:
     section = _extract_article_6(pages)
     items = _split_punkts(section)
-    results: list[tuple[Covenant, dict[str, bool]]] = []
+    results: list[tuple[Covenant, dict[str, bool], list[dict[str, Any]]]] = []
 
     for slot in SLOTS:
         item_text = items[slot]
         fallback_page, _, _ = _page_span_for_text(pages, item_text[:120])
-        extracted, verification = await _extract_covenant_item(
-            client,
+        try:
+            extracted, verification = await _extract_covenant_item(
+                client,
+                scenario_id=scenario_id,
+                slot=slot,
+                item_text=item_text,
+                verification_text=item_text,
+            )
+        except Exception as exc:  # noqa: BLE001 — one bad slot must not drop the scenario
+            conflicts.append(
+                {
+                    "kind": "COVENANT_EXTRACTION_FAILED",
+                    "scenario_id": scenario_id,
+                    "slot": f"6.{slot}",
+                    "error": str(exc),
+                },
+            )
+            continue
+
+        validation_issues = _validate_covenant_extract(
+            extracted,
             scenario_id=scenario_id,
             slot=slot,
-            item_text=item_text,
-            verification_text=item_text,
         )
+        if validation_issues:
+            feedback = "; ".join(
+                f"{issue['kind']}: {issue.get('threshold') or issue.get('metric_kind', '')}"
+                for issue in validation_issues
+            )
+            try:
+                extracted, verification = await _extract_covenant_item(
+                    client,
+                    scenario_id=scenario_id,
+                    slot=slot,
+                    item_text=item_text,
+                    verification_text=item_text,
+                    validation_feedback=feedback,
+                )
+            except Exception as exc:  # noqa: BLE001
+                conflicts.extend(validation_issues)
+                conflicts.append(
+                    {
+                        "kind": "COVENANT_VALIDATION_RETRY_FAILED",
+                        "scenario_id": scenario_id,
+                        "slot": f"6.{slot}",
+                        "error": str(exc),
+                    },
+                )
+                continue
+            validation_issues = _validate_covenant_extract(
+                extracted,
+                scenario_id=scenario_id,
+                slot=slot,
+            )
+        conflicts.extend(validation_issues)
 
         period = (extracted.period_start, extracted.period_end)
         if not _validate_period(
@@ -491,7 +724,7 @@ async def _process_scenario(
             pages=pages,
             fallback_page=fallback_page,
         )
-        results.append((covenant, verification))
+        results.append((covenant, verification, validation_issues))
 
     return results
 
@@ -501,57 +734,83 @@ async def _run_async(work_dir: Path) -> StageResult:
     bound = json.loads((work_dir / "03_bound.json").read_text(encoding="utf-8"))
     template = load_template(work_dir)
 
-    client = LLMClient()
-    conflicts: list[dict[str, Any]] = []
-    serialized: list[dict[str, Any]] = []
+    async with LLMClient() as client:
+        conflicts: list[dict[str, Any]] = []
+        serialized: list[dict[str, Any]] = []
 
-    scenarios = bound["scenarios"]
-    extracted_by_scenario: dict[str, dict[str, tuple[Covenant, dict[str, bool]]]] = {}
+        scenarios = bound["scenarios"]
+        extracted_by_scenario: dict[str, dict[str, tuple[Covenant, dict[str, bool]]]] = {}
 
-    for scenario_id in sorted({scenario for scenario, _slot in template_cells(template)}):
-        loan_doc_id = scenarios.get(scenario_id, {}).get("loan")
-        if not loan_doc_id:
-            if scenario_id not in scenarios:
-                conflicts.append({"kind": "EXTRA_SCENARIO", "scenario_id": scenario_id})
-            continue
-        try:
-            pages = inventory["documents"][loan_doc_id]["pages"]
-            scenario_results = await _process_scenario(
-                client,
-                scenario_id=scenario_id,
-                doc_id=loan_doc_id,
-                pages=pages,
-                conflicts=conflicts,
-            )
-            extracted_by_scenario[scenario_id] = {
-                covenant.slot: (covenant, verification)
-                for covenant, verification in scenario_results
-            }
-        except Exception as exc:  # noqa: BLE001 — structural gaps must not abort
-            conflicts.append(
-                {
-                    "kind": "COVENANT_EXTRACTION_FAILED",
-                    "scenario_id": scenario_id,
-                    "error": str(exc),
-                },
-            )
-
-    for scenario_id, slot in template_cells(template):
-        loan_doc_id = scenarios.get(scenario_id, {}).get("loan")
-        extracted_by_slot = extracted_by_scenario.get(scenario_id, {})
-        if slot in extracted_by_slot:
-            covenant, verification = extracted_by_slot[slot]
-            serialized.append(_serialize_covenant(covenant, verification))
-        else:
-            if loan_doc_id:
+        for scenario_id in sorted({scenario for scenario, _slot in template_cells(template)}):
+            loan_doc_id = scenarios.get(scenario_id, {}).get("loan")
+            if not loan_doc_id:
+                if scenario_id not in scenarios:
+                    conflicts.append({"kind": "EXTRA_SCENARIO", "scenario_id": scenario_id})
+                continue
+            try:
+                pages = inventory["documents"][loan_doc_id]["pages"]
+                scenario_results = await _process_scenario(
+                    client,
+                    scenario_id=scenario_id,
+                    doc_id=loan_doc_id,
+                    pages=pages,
+                    conflicts=conflicts,
+                )
+                extracted_by_scenario[scenario_id] = {
+                    covenant.slot: (covenant, verification)
+                    for covenant, verification, _issues in scenario_results
+                }
+            except Exception as exc:  # noqa: BLE001 — structural gaps must not abort
                 conflicts.append(
                     {
-                        "kind": "NEW_SLOT",
+                        "kind": "COVENANT_EXTRACTION_FAILED",
                         "scenario_id": scenario_id,
-                        "slot": slot,
+                        "error": str(exc),
                     },
                 )
-            serialized.append(_placeholder_covenant(scenario_id, slot))
+
+        for scenario_id, slot in template_cells(template):
+            loan_doc_id = scenarios.get(scenario_id, {}).get("loan")
+            extracted_by_slot = extracted_by_scenario.get(scenario_id, {})
+            if slot in extracted_by_slot:
+                covenant, verification = extracted_by_slot[slot]
+                serialized.append(_serialize_covenant(covenant, verification))
+            else:
+                if loan_doc_id:
+                    conflicts.append(
+                        {
+                            "kind": "NEW_SLOT",
+                            "scenario_id": scenario_id,
+                            "slot": slot,
+                        },
+                    )
+                serialized.append(_placeholder_covenant(scenario_id, slot))
+
+    extracted_covenants = [covenant for covenant in serialized if not covenant.get("degraded")]
+    invalid_covenant_keys = {
+        issue["covenant_key"]
+        for issue in conflicts
+        if issue.get("covenant_key")
+        and issue.get("kind")
+        in {
+            "ZERO_THRESHOLD",
+            "RATIO_THRESHOLD_TOO_LARGE",
+            "USD_THRESHOLD_TOO_SMALL",
+            "SPRINGING_VALUE_EQUALS_THRESHOLD",
+            "EMPTY_CATEGORY_KEYWORDS",
+            "THRESHOLD_UNIT_KIND_MISMATCH",
+            "CAPEX_SIGN_MISMATCH",
+            "OPEX_SIGN_MISMATCH",
+        }
+    }
+    if extracted_covenants:
+        invalid_fraction = Decimal(len(invalid_covenant_keys)) / Decimal(len(extracted_covenants))
+        if invalid_fraction > MAX_INVALID_COVENANT_FRACTION:
+            kinds = sorted({issue["kind"] for issue in conflicts if issue.get("covenant_key")})
+            raise AssertionError(
+                f"s4a_covenants: {len(invalid_covenant_keys)}/{len(extracted_covenants)} "
+                f"covenants failed validation (>{MAX_INVALID_COVENANT_FRACTION:.0%}): {kinds}",
+            )
 
     springing_count = sum(1 for covenant in serialized if covenant.get("springing") is not None)
     slot_62_directions = {

@@ -4,7 +4,7 @@
     "title_quote": "Minimum Cover of Applications by Sources",
     "direction": "MIN",
     "direction_quote": "не менее",
-    "threshold": "1.2",
+    "threshold": "1.20",
     "threshold_quote": "1.20x",
     "threshold_unit": "RATIO",
     "threshold_unit_quote": "x",
@@ -16,7 +16,7 @@
           "выручки",
           "поступлений"
         ],
-        "include_keywords_quote": "суммы выручки и поступлений по финансированию Заёмщика",
+        "include_keywords_quote": "суммы выручки и поступлений",
         "exclude_keywords": [],
         "exclude_keywords_quote": "",
         "sign": "INFLOW",
@@ -49,9 +49,9 @@
     "springing": null
   },
   "usage": {
-    "prompt_tokens": 3289,
-    "completion_tokens": 662,
-    "total_tokens": 3951
+    "prompt_tokens": 1435,
+    "completion_tokens": 324,
+    "total_tokens": 1759
   },
-  "cost_usd": "0.00089055"
+  "cost_usd": "0.00040965"
 }

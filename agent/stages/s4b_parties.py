@@ -13,6 +13,7 @@ import pandas as pd
 from agent.evidence.quotes import verify_extracted_fields, verify_quote
 from agent.llm.client import LLMClient
 from agent.llm.schemas.parties import KycPartiesExtract
+from agent.llm.vision_guard import complete_vision_dual
 from agent.models import Provenance, RelatedParty
 from agent.shape import is_canonical_open_dataset
 from agent.stages import StageResult
@@ -331,16 +332,23 @@ async def _extract_from_images(
     scenario_id: str,
     doc_id: str,
     image_paths: list[Path],
-) -> tuple[KycPartiesExtract, dict[str, bool], str]:
-    extracted = await client.complete_vision(
+) -> tuple[KycPartiesExtract, dict[str, bool], str, list[dict[str, Any]]]:
+    prompt = (
+        f"Scenario: {scenario_id}\n"
+        f"Document: {doc_id}\n\n"
+        f"{VISION_PROMPT}"
+    )
+    extracted, digit_mismatches = await complete_vision_dual(
+        client,
         response_model=KycPartiesExtract,
         system_prompt=SYSTEM_PROMPT,
-        prompt=(
-            f"Scenario: {scenario_id}\n"
-            f"Document: {doc_id}\n\n"
-            f"{VISION_PROMPT}"
-        ),
+        prompt=prompt,
         image_paths=image_paths,
+        context={
+            "scenario_id": scenario_id,
+            "doc_id": doc_id,
+            "stage": EXTRACTOR,
+        },
     )
     verification = {
         "header_account": False,
@@ -350,7 +358,7 @@ async def _extract_from_images(
     for index in range(len(extracted.ownership_rows)):
         verification[f"ownership_{index}_name"] = False
         verification[f"ownership_{index}_pct"] = False
-    return extracted, verification, "ocr"
+    return extracted, verification, "ocr", digit_mismatches
 
 
 def _needs_vision_fallback(extracted: KycPartiesExtract, verification: dict[str, bool]) -> bool:
@@ -391,7 +399,7 @@ async def _extract_dossier(
     scenario_id: str,
     doc_id: str,
     doc: dict[str, Any],
-) -> tuple[KycPartiesExtract, dict[str, bool], str, list[str], KycPartiesExtract | None]:
+) -> tuple[KycPartiesExtract, dict[str, bool], str, list[str], KycPartiesExtract | None, list[dict[str, Any]]]:
     pages = doc["pages"]
     text_header = _extract_header_account("\n".join(pages))
     fully_scanned = text_header is None and _is_scanned_dossier(doc)
@@ -399,13 +407,20 @@ async def _extract_dossier(
 
     if fully_scanned:
         image_paths = _vision_image_paths(work_dir=work_dir, doc_id=doc_id, doc=doc)
-        extracted, verification, source_kind = await _extract_from_images(
+        extracted, verification, source_kind, digit_mismatches = await _extract_from_images(
             client,
             scenario_id=scenario_id,
             doc_id=doc_id,
             image_paths=image_paths,
         )
-        return extracted, verification, source_kind, _review_fields_for_source(source_kind, verification), None
+        return (
+            extracted,
+            verification,
+            source_kind,
+            _review_fields_for_source(source_kind, verification),
+            None,
+            digit_mismatches,
+        )
 
     extracted, verification, source_kind = await _extract_from_text(
         client,
@@ -416,7 +431,7 @@ async def _extract_dossier(
 
     if doc.get("ocr_pages"):
         image_paths = _vision_image_paths(work_dir=work_dir, doc_id=doc_id, doc=doc)
-        vision_extracted, vision_verification, _ = await _extract_from_images(
+        vision_extracted, vision_verification, _, vision_mismatches = await _extract_from_images(
             client,
             scenario_id=scenario_id,
             doc_id=doc_id,
@@ -438,18 +453,22 @@ async def _extract_dossier(
             and vision_extracted.ownership_rows
         ):
             perimeter = vision_extracted
+        digit_mismatches = vision_mismatches
     elif _needs_vision_fallback(extracted, verification):
         image_paths = _vision_image_paths(work_dir=work_dir, doc_id=doc_id, doc=doc)
+        digit_mismatches = []
         if image_paths:
-            extracted, verification, source_kind = await _extract_from_images(
+            extracted, verification, source_kind, digit_mismatches = await _extract_from_images(
                 client,
                 scenario_id=scenario_id,
                 doc_id=doc_id,
                 image_paths=image_paths,
             )
+    else:
+        digit_mismatches = []
 
     review_fields = _review_fields_for_source(source_kind, verification)
-    return extracted, verification, source_kind, review_fields, perimeter
+    return extracted, verification, source_kind, review_fields, perimeter, digit_mismatches
 
 
 async def _resolve_scenario_for_dossier(
@@ -466,7 +485,7 @@ async def _resolve_scenario_for_dossier(
 
     if doc.get("ocr_pages"):
         image_paths = _vision_image_paths(work_dir=work_dir, doc_id=doc_id, doc=doc)
-        extracted, _, _ = await _extract_from_images(
+        extracted, _, _, _ = await _extract_from_images(
             client,
             scenario_id="bind",
             doc_id=doc_id,
@@ -518,279 +537,250 @@ def _related_outflow_rows(
     ]
 
 
-def _verify_payload(
+def _check_payload_structure(
     payload: dict[str, Any],
     *,
-    ledger: pd.DataFrame,
-    ground_truth: dict[str, Any],
+    conflicts: list[dict[str, Any]],
 ) -> None:
-    scenarios = payload["scenarios"]
-    if len(scenarios) != 12:
-        raise AssertionError(f"expected 12 scenarios, got {len(scenarios)}")
-
-    perimeter_scenario: str | None = None
-    for scenario_id, rec in scenarios.items():
-        peri = rec.get("perimeter")
-        if peri is None:
+    scenarios = payload.get("scenarios") or {}
+    for scenario_id, record in scenarios.items():
+        threshold = record.get("threshold_pct")
+        if threshold is None:
             continue
-        pcts = sorted(Decimal(str(row["ownership_pct"])) for row in peri["ownership"])
-        threshold = Decimal(str(peri["threshold_pct"]))
-        if pcts == [Decimal("11.4"), Decimal("87.6")] and threshold == Decimal("50.0"):
-            perimeter_scenario = scenario_id
-            related = [row for row in peri["ownership"] if row["is_related"]]
-            if len(related) != 1:
-                raise AssertionError(
-                    f"{scenario_id} perimeter expected 1 unrestricted subsidiary, got {len(related)}",
+        threshold_value = Decimal(str(threshold))
+        for row in record.get("ownership") or []:
+            ownership_pct = Decimal(str(row["ownership_pct"]))
+            if ownership_pct < 0 or ownership_pct > 100:
+                conflicts.append(
+                    {
+                        "kind": "OWNERSHIP_PCT_OUT_OF_RANGE",
+                        "scenario_id": scenario_id,
+                        "name": row.get("name"),
+                        "ownership_pct": str(ownership_pct),
+                    },
                 )
-            if peri.get("table_semantics") != "UNRESTRICTED_SUBSIDIARY":
-                raise AssertionError(
-                    f"{scenario_id} perimeter expected UNRESTRICTED_SUBSIDIARY semantics, "
-                    f"got {peri.get('table_semantics')}",
+            expected_related = _row_is_related(
+                ownership_pct,
+                threshold_value,
+                record.get("direction", "AT_OR_ABOVE"),
+            )
+            if row.get("is_related") != expected_related:
+                conflicts.append(
+                    {
+                        "kind": "RELATED_FLAG_MISMATCH",
+                        "scenario_id": scenario_id,
+                        "name": row.get("name"),
+                        "expected": expected_related,
+                        "actual": row.get("is_related"),
+                    },
                 )
-            break
-    if perimeter_scenario is None:
-        raise AssertionError("perimeter table with 87.6/11.4 and 50.0 threshold not found")
-
-    p5 = scenarios["P5"]
-    p5_related = [row for row in p5["ownership"] if row["is_related"]]
-    if len(p5_related) != 1:
-        raise AssertionError(f"P5 expected 1 related party, got {len(p5_related)}")
-
-    p5_outflows = _sum_related_outflows(
-        ledger,
-        scenario_id="P5",
-        ledger_map=p5["ledger_map"],
-    )
-    expected_p5 = Decimal(str(ground_truth["scenarios"]["P5"]["covenants"]["6.3"]["actual"]))
-    if p5_outflows != expected_p5:
-        raise AssertionError(f"P5 related outflows {p5_outflows} != expected {expected_p5}")
-
-    if Decimal(str(p5["threshold_pct"])) != Decimal("35.0"):
-        raise AssertionError(f"P5 threshold expected 35.0, got {p5['threshold_pct']}")
-
-    p6 = scenarios["P6"]
-    p6_related = [row for row in p6["ownership"] if row["is_related"]]
-    if len(p6_related) != 1:
-        raise AssertionError(f"P6 expected 1 related party, got {len(p6_related)}")
-
-    if Decimal(str(p6["threshold_pct"])) != Decimal("40.0"):
-        raise AssertionError(f"P6 threshold expected 40.0, got {p6['threshold_pct']}")
-
-    p6_pcts = sorted(Decimal(str(row["ownership_pct"])) for row in p6["ownership"])
-    if p6_pcts != [Decimal("11.5"), Decimal("38.1"), Decimal("46.8")]:
-        raise AssertionError(f"P6 ownership percentages unexpected: {p6_pcts}")
-
-    p6_rows = _related_outflow_rows(ledger, scenario_id="P6", ledger_map=p6["ledger_map"])
-    if len(p6_rows) != 1:
-        raise AssertionError(f"P6 expected 1 related-party payment, got {len(p6_rows)}")
-
-    payment = abs(Decimal(str(p6_rows.iloc[0]["amount"])))
-    expected_ratio = Decimal(str(ground_truth["scenarios"]["P6"]["covenants"]["6.1"]["actual"]))
-    implied_opex = payment / expected_ratio
-    computed_ratio = payment / implied_opex
-    if computed_ratio != Decimal("0.10"):
-        raise AssertionError(f"P6 related-payment ratio expected 0.10, got {computed_ratio}")
 
 
 async def _run_async(work_dir: Path) -> StageResult:
     inventory = json.loads((work_dir / "01_inventory.json").read_text(encoding="utf-8"))
     classified = json.loads((work_dir / "02_classified.json").read_text(encoding="utf-8"))
     bound = json.loads((work_dir / "03_bound.json").read_text(encoding="utf-8"))
-    ground_truth_path = work_dir / "ground_truth.json"
-    if not ground_truth_path.is_file():
-        ground_truth_path = Path(__file__).resolve().parents[2] / "eval" / "ground_truth.json"
-    ground_truth = json.loads(ground_truth_path.read_text(encoding="utf-8"))
 
     ledger = pd.read_csv(work_dir / "master_ledger_2025.csv")
     account_to_scenario = bound["account_to_scenario"]
     scenario_ids = sorted(set(account_to_scenario.values()))
 
-    client = LLMClient()
     conflicts: list[dict[str, Any]] = []
+    review: list[dict[str, Any]] = []
     candidates = _discover_kyc_candidates(inventory, classified)
     scenario_bindings: dict[str, str] = {}
     pre_extracted: dict[str, KycPartiesExtract] = {}
 
-    for doc_id, doc in candidates:
-        scenario_id, ocr_extract = await _resolve_scenario_for_dossier(
-            client,
-            work_dir=work_dir,
-            doc_id=doc_id,
-            doc=doc,
-            account_to_scenario=account_to_scenario,
-        )
-        if scenario_id is None:
-            if doc.get("ocr_pages") and ocr_extract is not None:
-                conflicts.append(
-                    {
-                        "kind": "UNBOUND_DOCUMENT",
-                        "doc_id": doc_id,
-                        "header_account": ocr_extract.header_account,
-                    },
-                )
-            elif not doc.get("ocr_pages"):
-                header_account = _extract_header_account("\n".join(doc["pages"]))
-                if header_account is None:
-                    conflicts.append({"kind": "KYC_HEADER_ACCOUNT_NOT_FOUND", "doc_id": doc_id})
-                else:
+    async with LLMClient() as client:
+        for doc_id, doc in candidates:
+            scenario_id, ocr_extract = await _resolve_scenario_for_dossier(
+                client,
+                work_dir=work_dir,
+                doc_id=doc_id,
+                doc=doc,
+                account_to_scenario=account_to_scenario,
+            )
+            if scenario_id is None:
+                if doc.get("ocr_pages") and ocr_extract is not None:
                     conflicts.append(
                         {
                             "kind": "UNBOUND_DOCUMENT",
                             "doc_id": doc_id,
-                            "header_account": header_account,
+                            "header_account": ocr_extract.header_account,
                         },
                     )
-            continue
+                elif not doc.get("ocr_pages"):
+                    header_account = _extract_header_account("\n".join(doc["pages"]))
+                    if header_account is None:
+                        conflicts.append({"kind": "KYC_HEADER_ACCOUNT_NOT_FOUND", "doc_id": doc_id})
+                    else:
+                        conflicts.append(
+                            {
+                                "kind": "UNBOUND_DOCUMENT",
+                                "doc_id": doc_id,
+                                "header_account": header_account,
+                            },
+                        )
+                continue
 
-        previous = scenario_bindings.get(scenario_id)
-        if previous is not None and previous != doc_id:
-            conflicts.append(
-                {
-                    "kind": "DUPLICATE_KYC",
-                    "scenario_id": scenario_id,
-                    "doc_ids": [previous, doc_id],
-                },
-            )
-            continue
+            previous = scenario_bindings.get(scenario_id)
+            if previous is not None and previous != doc_id:
+                conflicts.append(
+                    {
+                        "kind": "DUPLICATE_KYC",
+                        "scenario_id": scenario_id,
+                        "doc_ids": [previous, doc_id],
+                    },
+                )
+                continue
 
-        scenario_bindings[scenario_id] = doc_id
-        if ocr_extract is not None:
-            pre_extracted[doc_id] = ocr_extract
+            scenario_bindings[scenario_id] = doc_id
+            if ocr_extract is not None:
+                pre_extracted[doc_id] = ocr_extract
 
-    scenario_payloads: dict[str, dict[str, Any]] = {}
+        scenario_payloads: dict[str, dict[str, Any]] = {}
 
-    for scenario_id in scenario_ids:
-        doc_id = scenario_bindings.get(scenario_id)
-        if doc_id is None:
-            conflicts.append({"kind": "MISSING_KYC", "scenario_id": scenario_id})
-            continue
+        for scenario_id in scenario_ids:
+            doc_id = scenario_bindings.get(scenario_id)
+            if doc_id is None:
+                conflicts.append({"kind": "MISSING_KYC", "scenario_id": scenario_id})
+                continue
 
-        doc = inventory["documents"][doc_id]
-        if doc_id in pre_extracted:
-            extracted = pre_extracted[doc_id]
-            verification = {
-                "header_account": False,
-                "table_semantics": False,
-                "threshold": False,
-            }
-            for index in range(len(extracted.ownership_rows)):
-                verification[f"ownership_{index}_name"] = False
-                verification[f"ownership_{index}_pct"] = False
-            source_kind = "ocr"
-            review_fields = _review_fields_for_source(source_kind, verification)
-            perimeter = None
-        else:
-            extracted, verification, source_kind, review_fields, perimeter = await _extract_dossier(
-                client,
-                work_dir=work_dir,
-                scenario_id=scenario_id,
-                doc_id=doc_id,
-                doc=doc,
-            )
+            doc = inventory["documents"][doc_id]
+            if doc_id in pre_extracted:
+                extracted = pre_extracted[doc_id]
+                verification = {
+                    "header_account": False,
+                    "table_semantics": False,
+                    "threshold": False,
+                }
+                for index in range(len(extracted.ownership_rows)):
+                    verification[f"ownership_{index}_name"] = False
+                    verification[f"ownership_{index}_pct"] = False
+                source_kind = "ocr"
+                review_fields = _review_fields_for_source(source_kind, verification)
+                perimeter = None
+                digit_mismatches: list[dict[str, Any]] = []
+            else:
+                extracted, verification, source_kind, review_fields, perimeter, digit_mismatches = (
+                    await _extract_dossier(
+                        client,
+                        work_dir=work_dir,
+                        scenario_id=scenario_id,
+                        doc_id=doc_id,
+                        doc=doc,
+                    )
+                )
 
-        if not extracted.threshold_quote.strip():
-            conflicts.append(
-                {
-                    "kind": "KYC_THRESHOLD_NOT_FOUND",
-                    "scenario_id": scenario_id,
-                    "doc_id": doc_id,
-                },
-            )
-            continue
+            conflicts.extend(digit_mismatches)
+            review.extend(digit_mismatches)
 
-        threshold = extracted.threshold_pct
-        table_semantics = extracted.table_semantics
-        pages = doc["pages"]
-        parties, ownership_rows = _related_parties_from_extract(
-            extracted,
-            doc_id=doc_id,
-            pages=pages,
-            threshold=threshold,
-            table_semantics=table_semantics,
-            source_kind=source_kind,
-        )
-        related_counterparties = [party.counterparty for party in parties if party.is_related]
+            if not extracted.threshold_quote.strip():
+                conflicts.append(
+                    {
+                        "kind": "KYC_THRESHOLD_NOT_FOUND",
+                        "scenario_id": scenario_id,
+                        "doc_id": doc_id,
+                    },
+                )
+                continue
 
-        scenario_ledger = ledger[ledger["txn_id"].str.startswith(f"TXN-{scenario_id}-")]
-        ledger_map = _build_ledger_map(
-            scenario_ledger["counterparty"].tolist(),
-            related_counterparties,
-        )
-
-        confidence = _confidence_from_verification(verification, source_kind=source_kind)
-        threshold_page = _source_page_for_quote(pages, extracted.threshold_quote)
-        semantics_page = _source_page_for_quote(pages, extracted.table_semantics_quote)
-
-        scenario_payloads[scenario_id] = {
-            "scenario_id": scenario_id,
-            "doc_id": doc_id,
-            "header_account": extracted.header_account,
-            "table_semantics": table_semantics,
-            "direction": _direction_for_semantics(table_semantics),
-            "table_semantics_source": _serialize_provenance(
-                Provenance(
-                    doc_id=doc_id,
-                    page=semantics_page,
-                    quote=extracted.table_semantics_quote,
-                    extractor=EXTRACTOR,
-                ),
-                source_kind=source_kind,
-            ),
-            "threshold_pct": _decimal_to_str(threshold),
-            "threshold_source": _serialize_provenance(
-                Provenance(
-                    doc_id=doc_id,
-                    page=threshold_page,
-                    quote=extracted.threshold_quote,
-                    extractor=EXTRACTOR,
-                ),
-                source_kind=source_kind,
-            ),
-            "ownership": ownership_rows,
-            "related_counterparties": related_counterparties,
-            "related_normalized": {
-                normalize_counterparty(name): name for name in related_counterparties
-            },
-            "ledger_map": ledger_map,
-            "confidence": _decimal_to_str(confidence),
-            "review_fields": review_fields,
-            "verification": verification,
-        }
-
-        if perimeter is not None:
-            peri_threshold = perimeter.threshold_pct
-            _, peri_rows = _related_parties_from_extract(
-                perimeter,
+            threshold = extracted.threshold_pct
+            table_semantics = extracted.table_semantics
+            pages = doc["pages"]
+            parties, ownership_rows = _related_parties_from_extract(
+                extracted,
                 doc_id=doc_id,
                 pages=pages,
-                threshold=peri_threshold,
-                table_semantics=perimeter.table_semantics,
-                source_kind="ocr",
+                threshold=threshold,
+                table_semantics=table_semantics,
+                source_kind=source_kind,
             )
-            scenario_payloads[scenario_id]["perimeter"] = {
-                "table_semantics": perimeter.table_semantics,
-                "direction": _direction_for_semantics(perimeter.table_semantics),
-                "threshold_pct": _decimal_to_str(peri_threshold),
-                "ownership": peri_rows,
-            }
-            scenario_payloads[scenario_id]["review_fields"] = list(
-                dict.fromkeys(
-                    scenario_payloads[scenario_id]["review_fields"]
-                    + ["perimeter"],
+            related_counterparties = [party.counterparty for party in parties if party.is_related]
+
+            scenario_ledger = ledger[ledger["txn_id"].str.startswith(f"TXN-{scenario_id}-")]
+            ledger_map = _build_ledger_map(
+                scenario_ledger["counterparty"].tolist(),
+                related_counterparties,
+            )
+
+            confidence = _confidence_from_verification(verification, source_kind=source_kind)
+            threshold_page = _source_page_for_quote(pages, extracted.threshold_quote)
+            semantics_page = _source_page_for_quote(pages, extracted.table_semantics_quote)
+
+            scenario_payloads[scenario_id] = {
+                "scenario_id": scenario_id,
+                "doc_id": doc_id,
+                "header_account": extracted.header_account,
+                "table_semantics": table_semantics,
+                "direction": _direction_for_semantics(table_semantics),
+                "table_semantics_source": _serialize_provenance(
+                    Provenance(
+                        doc_id=doc_id,
+                        page=semantics_page,
+                        quote=extracted.table_semantics_quote,
+                        extractor=EXTRACTOR,
+                    ),
+                    source_kind=source_kind,
                 ),
-            )
+                "threshold_pct": _decimal_to_str(threshold),
+                "threshold_source": _serialize_provenance(
+                    Provenance(
+                        doc_id=doc_id,
+                        page=threshold_page,
+                        quote=extracted.threshold_quote,
+                        extractor=EXTRACTOR,
+                    ),
+                    source_kind=source_kind,
+                ),
+                "ownership": ownership_rows,
+                "related_counterparties": related_counterparties,
+                "related_normalized": {
+                    normalize_counterparty(name): name for name in related_counterparties
+                },
+                "ledger_map": ledger_map,
+                "confidence": _decimal_to_str(confidence),
+                "review_fields": review_fields,
+                "verification": verification,
+            }
+
+            if perimeter is not None:
+                peri_threshold = perimeter.threshold_pct
+                _, peri_rows = _related_parties_from_extract(
+                    perimeter,
+                    doc_id=doc_id,
+                    pages=pages,
+                    threshold=peri_threshold,
+                    table_semantics=perimeter.table_semantics,
+                    source_kind="ocr",
+                )
+                scenario_payloads[scenario_id]["perimeter"] = {
+                    "table_semantics": perimeter.table_semantics,
+                    "direction": _direction_for_semantics(perimeter.table_semantics),
+                    "threshold_pct": _decimal_to_str(peri_threshold),
+                    "ownership": peri_rows,
+                }
+                scenario_payloads[scenario_id]["review_fields"] = list(
+                    dict.fromkeys(
+                        scenario_payloads[scenario_id]["review_fields"]
+                        + ["perimeter"],
+                    ),
+                )
 
     payload = {
         "scenarios": scenario_payloads,
         "conflicts": conflicts,
+        "review": review,
         "summary": {
             "scenario_count": len(scenario_payloads),
             "related_party_rows": sum(len(item["ownership"]) for item in scenario_payloads.values()),
+            "review_count": len(review),
         },
     }
 
     if is_canonical_open_dataset(work_dir):
-        _verify_payload(payload, ledger=ledger, ground_truth=ground_truth)
+        _check_payload_structure(payload, conflicts=conflicts)
+        payload["summary"]["conflict_count"] = len(conflicts)
 
     output_path = work_dir / "04b_parties.json"
     output_path.write_text(
