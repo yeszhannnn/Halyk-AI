@@ -17,6 +17,8 @@ EMPTY_CATEGORY_SPEC = "EMPTY_CATEGORY_SPEC"
 GROUP_FIGURE_NOT_FOUND = "GROUP_FIGURE_NOT_FOUND"
 WIDE_LEG_REVIEW = "WIDE_LEG_REVIEW"
 SCENARIO_SCOPE_VIOLATION = "SCENARIO_SCOPE_VIOLATION"
+LEG_SUBTOTAL_MISMATCH = "LEG_SUBTOTAL_MISMATCH"
+ADJUSTMENT_APPLIED_TWICE = "ADJUSTMENT_APPLIED_TWICE"
 
 FUNDING_EXCLUSION_MARKERS = (
     "refund",
@@ -188,10 +190,15 @@ class LegBreakdown:
         return len(self.categories)
 
 
+def _ledger_category(row: dict[str, Any]) -> str:
+    """Post-adjustment category from s5_ledger (destination leg sees RECLASS)."""
+    return str(row.get("category") or "other")
+
+
 def _effective_category(row: dict[str, Any], apply_reclass: bool) -> str:
-    if apply_reclass:
-        return str(row.get("category") or "other")
-    return str(row.get("original_category") or row.get("category") or "other")
+    # apply_reclass only gates exclusion of rows reclassified out of this leg;
+    # inclusion always uses the adjusted ledger category.
+    return _ledger_category(row)
 
 
 def _in_period(row: dict[str, Any], period: tuple[date, date]) -> bool:
@@ -300,14 +307,35 @@ def _keyword_matches(
     return False
 
 
-def _exclude_matches(keyword: str, *, row: dict[str, Any], category: str) -> bool:
+def _exclude_matches(
+    keyword: str,
+    *,
+    row: dict[str, Any],
+    category: str,
+    apply_reclass: bool,
+    spec: dict[str, Any],
+) -> bool:
     key = keyword.casefold()
     if "финансовых или иных неоперационных статей" in key:
         return category == "financing"
     if "переклассифицированные аудиторами" in key:
-        return bool(row.get("adjustment_ref")) and str(row.get("adjustment_ref", "")).startswith(
-            "adj_"
-        ) and row.get("original_category") != row.get("category")
+        if not apply_reclass:
+            return False
+        if not row.get("adjustment_ref"):
+            return False
+        original = str(row.get("original_category") or row.get("category") or "other")
+        current = _ledger_category(row)
+        if original == current:
+            return False
+        for include_keyword in spec.get("include_keywords") or []:
+            if _keyword_matches(
+                include_keyword,
+                row={**row, "category": original, "original_category": original},
+                category=original,
+                parties=None,
+            ):
+                return True
+        return False
     if "аффилированных и связанных сторон" in key:
         return False
     if "ограниченной" in key:
@@ -337,9 +365,16 @@ def _row_matches_spec(
     if not _sign_ok(amount, spec["sign"]):
         return False
 
-    category = _effective_category(row, bool(spec.get("apply_reclass", True)))
+    apply_reclass = bool(spec.get("apply_reclass", True))
+    category = _effective_category(row, apply_reclass)
     for keyword in spec.get("exclude_keywords") or []:
-        if _exclude_matches(keyword, row=row, category=category):
+        if _exclude_matches(
+            keyword,
+            row=row,
+            category=category,
+            apply_reclass=apply_reclass,
+            spec=spec,
+        ):
             return False
 
     include_keywords = spec.get("include_keywords") or []
@@ -385,15 +420,77 @@ def _sum_rows(rows: list[dict[str, Any]]) -> Decimal:
     return total
 
 
-def _addback_total(adjustments: dict[str, Any], scenario_id: str) -> Decimal:
-    total = ZERO
-    for adj in adjustments.values():
+def _ebitda_addback_adjustments(
+    adjustments: dict[str, Any],
+    scenario_id: str,
+) -> list[tuple[str, Decimal]]:
+    """EBITDA add-backs target the numerator leg only."""
+    items: list[tuple[str, Decimal]] = []
+    for adj_id, adj in adjustments.items():
         if adj.get("scenario_id") != scenario_id or adj.get("kind") != "EBITDA_ADDBACK":
             continue
+        total = ZERO
         for row in adj.get("rows") or []:
             if row.get("above_floor"):
                 total += _d(row.get("amount"))
-    return total
+        if total != ZERO:
+            items.append((adj_id, total))
+    return items
+
+
+def _addback_total(adjustments: dict[str, Any], scenario_id: str) -> Decimal:
+    return sum(
+        (amount for _, amount in _ebitda_addback_adjustments(adjustments, scenario_id)),
+        ZERO,
+    )
+
+
+def _record_adjustment_application(
+    metadata: dict[str, Any] | None,
+    *,
+    adjustment_id: str,
+    leg: str,
+    scenario_id: str,
+    slot: str,
+) -> None:
+    if metadata is None:
+        return
+    applied = metadata.setdefault("adjustments_applied", {})
+    prior_leg = applied.get(adjustment_id)
+    if prior_leg is not None and prior_leg != leg:
+        raise ValueError(
+            f"{ADJUSTMENT_APPLIED_TWICE}: {adjustment_id} applied to "
+            f"{prior_leg} and {leg} in {scenario_id}/{slot}"
+        )
+    applied[adjustment_id] = leg
+
+
+def _assert_leg_subtotal(
+    breakdown: LegBreakdown,
+    *,
+    scenario_id: str,
+    slot: str,
+    leg: str,
+) -> None:
+    if breakdown.kind == "empty":
+        if breakdown.value != ZERO:
+            raise ValueError(
+                f"{LEG_SUBTOTAL_MISMATCH}: {scenario_id}/{slot} {leg} "
+                f"empty leg subtotal {breakdown.value} != 0"
+            )
+        return
+
+    expected = _sum_rows(breakdown.rows)
+    for _, amount in breakdown.terms:
+        expected += amount
+
+    if breakdown.value != expected:
+        raise ValueError(
+            f"{LEG_SUBTOTAL_MISMATCH}: {scenario_id}/{slot} {leg} "
+            f"subtotal {breakdown.value} != sum of terms {expected} "
+            f"(rows={_sum_rows(breakdown.rows)}, "
+            f"adjustment_terms={sum((a for _, a in breakdown.terms), ZERO)})"
+        )
 
 
 def _compute_ebitda(
@@ -594,6 +691,7 @@ def _leg_breakdown(
     parties: dict[str, Any] | None,
     adjustments: dict[str, Any],
     scenario_id: str,
+    slot: str,
     leg: str,
     metric: dict[str, Any],
     full_ledger: list[dict[str, Any]],
@@ -609,6 +707,7 @@ def _leg_breakdown(
         flags.append(EMPTY_CATEGORY_SPEC)
         breakdown = LegBreakdown(kind="empty", value=ZERO, flags=flags)
         _record_leg_metadata(metadata, leg=leg, breakdown=breakdown)
+        _assert_leg_subtotal(breakdown, scenario_id=scenario_id, slot=slot, leg=leg)
         return breakdown
 
     scope = metric.get("scope", "BORROWER")
@@ -632,26 +731,46 @@ def _leg_breakdown(
                 flags=flags,
             )
             _record_leg_metadata(metadata, leg=leg, breakdown=breakdown)
+            _assert_leg_subtotal(breakdown, scenario_id=scenario_id, slot=slot, leg=leg)
             return breakdown
         flags.append(GROUP_FIGURE_NOT_FOUND)
         if metadata is not None:
             metadata["strategy"] = "group_scope_borrower_fallback"
 
     if any("ebitda" in k for k in keywords):
-        addbacks = ZERO
-        if "скорректированная" in _metric_notes(metric.get("notes", "")):
-            addbacks = _addback_total(adjustments, scenario_id)
+        addback_items: list[tuple[str, Decimal]] = []
+        if leg == "numerator" and "скорректированная" in _metric_notes(metric.get("notes", "")):
+            addback_items = _ebitda_addback_adjustments(adjustments, scenario_id)
+            for adj_id, _ in addback_items:
+                _record_adjustment_application(
+                    metadata,
+                    adjustment_id=adj_id,
+                    leg=leg,
+                    scenario_id=scenario_id,
+                    slot=slot,
+                )
+        addbacks = sum(
+            (amount for _, amount in addback_items),
+            ZERO,
+        )
         borrower_ledger = _rows_for_scope(full_ledger, scenario_id=scenario_id, scope="BORROWER")
         label = "adjusted EBITDA" if addbacks != ZERO else "EBITDA"
         breakdown = _ebitda_breakdown(
             borrower_ledger,
             period=period,
             apply_reclass=bool(spec.get("apply_reclass", True)),
-            addbacks=addbacks if leg == "numerator" else ZERO,
+            addbacks=addbacks,
             label=label,
         )
+        if addback_items:
+            breakdown.terms = [
+                term for term in breakdown.terms if term[0] != "addbacks"
+            ]
+            for adj_id, amount in addback_items:
+                breakdown.terms.append((f"addback:{adj_id}", amount))
         breakdown.flags.extend(flags)
         _record_leg_metadata(metadata, leg=leg, breakdown=breakdown)
+        _assert_leg_subtotal(breakdown, scenario_id=scenario_id, slot=slot, leg=leg)
         return breakdown
 
     rows = _filter_rows(
@@ -664,8 +783,6 @@ def _leg_breakdown(
     _assert_leg_scenario(rows, scenario_id=scenario_id, leg=leg)
     categories = _leg_categories(rows, spec)
     value = _sum_rows(rows)
-    if leg == "denominator" and any("выручка" in k for k in keywords):
-        value += _addback_total(adjustments, scenario_id)
 
     kind = "rows" if rows else "empty"
     breakdown = LegBreakdown(
@@ -676,6 +793,7 @@ def _leg_breakdown(
         flags=flags,
     )
     _record_leg_metadata(metadata, leg=leg, breakdown=breakdown)
+    _assert_leg_subtotal(breakdown, scenario_id=scenario_id, slot=slot, leg=leg)
     return breakdown
 
 
@@ -687,6 +805,7 @@ def _leg_value(
     parties: dict[str, Any] | None,
     adjustments: dict[str, Any],
     scenario_id: str,
+    slot: str,
     leg: str,
     metric: dict[str, Any],
     full_ledger: list[dict[str, Any]],
@@ -700,6 +819,7 @@ def _leg_value(
         parties=parties,
         adjustments=adjustments,
         scenario_id=scenario_id,
+        slot=slot,
         leg=leg,
         metric=metric,
         full_ledger=full_ledger,
@@ -733,6 +853,7 @@ def describe_leg_breakdown(
         parties=parties,
         adjustments=adjustments,
         scenario_id=scenario_id,
+        slot=covenant["slot"],
         leg=leg,
         metric=metric,
         full_ledger=ledger,
@@ -752,6 +873,7 @@ def compute_covenant_metric(
     """Compute the covenant metric at full Decimal precision."""
     adjustments = adjustments or {}
     scenario_id = covenant["scenario_id"]
+    slot = covenant["slot"]
     period = (_parse_date(covenant["period"][0]), _parse_date(covenant["period"][1]))
     scenario_ledger = [row for row in ledger if row.get("scenario_id") == scenario_id]
 
@@ -774,6 +896,7 @@ def compute_covenant_metric(
             parties=parties,
             adjustments=adjustments,
             scenario_id=scenario_id,
+            slot=slot,
             leg="numerator",
             metric=metric,
             full_ledger=ledger,
@@ -788,6 +911,7 @@ def compute_covenant_metric(
         parties=parties,
         adjustments=adjustments,
         scenario_id=scenario_id,
+        slot=slot,
         leg="numerator",
         metric=metric,
         full_ledger=ledger,
@@ -801,6 +925,7 @@ def compute_covenant_metric(
         parties=parties,
         adjustments=adjustments,
         scenario_id=scenario_id,
+        slot=slot,
         leg="denominator",
         metric={**metric, "scope": "BORROWER"},
         full_ledger=ledger,

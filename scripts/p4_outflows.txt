@@ -1,0 +1,11 @@
+rent: 21493940.78
+personnel: 17450412.83
+marketing: 14763409.66
+tax: 12386941.34
+interest: 4739285.54
+opex: 4431662.19
+insurance: 2826424.90
+utilities: 2398400.29
+capex: 1652704.31
+other: 1075491.85
+consulting: 288417.52

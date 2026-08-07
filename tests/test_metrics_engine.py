@@ -10,6 +10,7 @@ import pytest
 from agent.metrics.engine import (
     EMPTY_CATEGORY_SPEC,
     GROUP_FIGURE_NOT_FOUND,
+    LEG_SUBTOTAL_MISMATCH,
     SCENARIO_SCOPE_VIOLATION,
     _assert_leg_scenario,
     _is_excluded_inflow,
@@ -144,3 +145,72 @@ def test_scenario_scope_invariant_raises() -> None:
             scenario_id="P2",
             leg="numerator",
         )
+
+
+def _adjustments() -> dict:
+    return json.loads((OPEN / "04c_adjustments.json").read_text(encoding="utf-8"))["adjustments"]
+
+
+def test_reclass_row_reaches_destination_leg() -> None:
+    covenants = json.loads((OPEN / "04a_covenants.json").read_text(encoding="utf-8"))["covenants"]
+    covenant = next(c for c in covenants if c["scenario_id"] == "P2" and c["slot"] == "6.1")
+    breakdown = describe_leg_breakdown(
+        covenant,
+        _ledger(),
+        leg="denominator",
+        adjustments=_adjustments(),
+        work_dir=OPEN,
+    )
+    txn_ids = {row["txn_id"] for row in breakdown.rows}
+    assert "TXN-P2-0040" in txn_ids
+    assert breakdown.value == Decimal("10227549.20")
+
+
+def test_ebitda_addback_stays_on_numerator_leg() -> None:
+    covenants = json.loads((OPEN / "04a_covenants.json").read_text(encoding="utf-8"))["covenants"]
+    covenant = next(c for c in covenants if c["scenario_id"] == "P4" and c["slot"] == "6.1")
+    adjustments = _adjustments()
+    numerator = describe_leg_breakdown(
+        covenant,
+        _ledger(),
+        leg="numerator",
+        adjustments=adjustments,
+        work_dir=OPEN,
+    )
+    denominator = describe_leg_breakdown(
+        covenant,
+        _ledger(),
+        leg="denominator",
+        adjustments=adjustments,
+        work_dir=OPEN,
+    )
+    row_sum = sum(abs(Decimal(str(row["amount_usd"]))) for row in denominator.rows)
+    assert denominator.value == row_sum
+    assert denominator.value == Decimal("7004318.47")
+    assert any(label.startswith("addback:") for label, _ in numerator.terms)
+    assert numerator.value == Decimal("3396809.19")
+
+
+def test_p2_6_1_breach_with_reclass_evidence() -> None:
+    covenants = json.loads((OPEN / "04a_covenants.json").read_text(encoding="utf-8"))["covenants"]
+    covenant = next(c for c in covenants if c["scenario_id"] == "P2" and c["slot"] == "6.1")
+    actual = compute_covenant_metric(
+        covenant,
+        _ledger(),
+        adjustments=_adjustments(),
+        work_dir=OPEN,
+    )
+    assert actual > Decimal("1.18") - Decimal("0.01")
+    assert actual < Decimal("1.20")
+
+
+def test_leg_subtotal_mismatch_raises() -> None:
+    from agent.metrics.engine import LegBreakdown, _assert_leg_subtotal
+
+    breakdown = LegBreakdown(
+        kind="rows",
+        value=Decimal("100"),
+        rows=[{"amount_usd": "50"}],
+    )
+    with pytest.raises(ValueError, match=LEG_SUBTOTAL_MISMATCH):
+        _assert_leg_subtotal(breakdown, scenario_id="P4", slot="6.1", leg="denominator")
