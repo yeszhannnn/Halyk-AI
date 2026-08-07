@@ -1,0 +1,59 @@
+{
+  "response": {
+    "title": "Minimum Cover of Applications by Sources",
+    "title_quote": "Minimum Cover of Applications by Sources",
+    "direction": "MIN",
+    "direction_quote": "не менее",
+    "threshold": "1.2",
+    "threshold_quote": "1.20x",
+    "threshold_unit": "RATIO",
+    "threshold_unit_quote": "x",
+    "metric": {
+      "kind": "RATIO",
+      "kind_quote": "отношение суммы выручки и поступлений по финансированию Заёмщика к сумме операционных и капитальных затрат",
+      "numerator": {
+        "include_keywords": [
+          "выручки",
+          "поступлений"
+        ],
+        "include_keywords_quote": "суммы выручки и поступлений",
+        "exclude_keywords": [],
+        "exclude_keywords_quote": "",
+        "sign": "INFLOW",
+        "sign_quote": "поступлений",
+        "apply_reclass": false,
+        "apply_reclass_quote": ""
+      },
+      "denominator": {
+        "include_keywords": [
+          "операционных",
+          "капитальных",
+          "затрат"
+        ],
+        "include_keywords_quote": "сумме операционных и капитальных затрат",
+        "exclude_keywords": [],
+        "exclude_keywords_quote": "",
+        "sign": "OUTFLOW",
+        "sign_quote": "затрат",
+        "apply_reclass": false,
+        "apply_reclass_quote": ""
+      },
+      "scope": "BORROWER",
+      "scope_quote": "Заёмщика",
+      "notes": "",
+      "notes_quote": ""
+    },
+    "notes": "Отношение суммы выручки и поступлений по финансированию Заёмщика к сумме операционных и капитальных затрат",
+    "notes_quote": "отношение суммы выручки и поступлений по финансированию Заёмщика к сумме операционных и капитальных затрат",
+    "period_start": "2025-01-01",
+    "period_end": "2025-12-31",
+    "period_quote": "за период с 2025-01-01 по 2025-12-31",
+    "springing": null
+  },
+  "usage": {
+    "prompt_tokens": 3357,
+    "completion_tokens": 630,
+    "total_tokens": 3987
+  },
+  "cost_usd": "0.00088155"
+}

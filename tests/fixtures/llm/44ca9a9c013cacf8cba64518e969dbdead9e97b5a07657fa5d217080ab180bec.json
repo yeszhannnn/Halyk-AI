@@ -1,0 +1,31 @@
+{
+  "response": {
+    "kind": "CUTOFF",
+    "kind_quote": "Операция TXN-P1-0045 (счёт-фактура от 2025-08-12) относится к услугам, оказанным в период с 2026-01-15 по 2026-03-20.",
+    "txn_id": "TXN-P1-0045",
+    "txn_id_quote": "Операция TXN-P1-0045",
+    "amount": null,
+    "amount_quote": "",
+    "counterparty": "AKTAU PORT SERVICES JSC",
+    "counterparty_quote": "AKTAU PORT SERVICES JSC",
+    "from_category": null,
+    "from_category_quote": "",
+    "to_category": null,
+    "to_category_quote": "",
+    "category": null,
+    "category_quote": "",
+    "fx_source_amount": null,
+    "fx_source_currency": null,
+    "fx_settlement_usd": null,
+    "fx_quote": "",
+    "materiality_floor": null,
+    "materiality_floor_quote": "",
+    "ebitda_rows": []
+  },
+  "usage": {
+    "prompt_tokens": 1418,
+    "completion_tokens": 139,
+    "total_tokens": 1557
+  },
+  "cost_usd": "0.0002961"
+}

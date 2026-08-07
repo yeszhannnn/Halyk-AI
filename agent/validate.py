@@ -158,6 +158,8 @@ def validate(
         covenants_payload = _load_json(covenants_path)
         inventory = _load_json(inventory_path)
         for covenant in covenants_payload.get("covenants") or []:
+            if covenant.get("degraded"):
+                continue
             period = covenant.get("period") or []
             if not all(str(item).startswith("2025") for item in period):
                 errors.append(
@@ -165,6 +167,8 @@ def validate(
                 )
             source = covenant.get("source") or {}
             quote = str(source.get("quote", ""))
+            if not quote:
+                continue
             page_text = _page_text(inventory, str(source.get("doc_id", "")), int(source.get("page", 1)))
             if quote and not verify_quote(quote, page_text):
                 errors.append(

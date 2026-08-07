@@ -1,0 +1,56 @@
+{
+  "response": {
+    "title": "Maximum Related-Party Payments as a Proportion of Revenue",
+    "title_quote": "Maximum Related-Party Payments as a Proportion of Revenue",
+    "direction": "MAX",
+    "direction_quote": "не допускать, чтобы совокупные Ограниченные платежи в пользу аффилированных лиц... превышали",
+    "threshold": "0.03",
+    "threshold_quote": "0.03x",
+    "threshold_unit": "RATIO",
+    "threshold_unit_quote": "x",
+    "metric": {
+      "kind": "RATIO",
+      "kind_quote": "пропорция",
+      "numerator": {
+        "include_keywords": [
+          "Ограниченные платежи"
+        ],
+        "include_keywords_quote": "Ограниченные платежи",
+        "exclude_keywords": [],
+        "exclude_keywords_quote": "",
+        "sign": "INFLOW",
+        "sign_quote": "в пользу",
+        "apply_reclass": true,
+        "apply_reclass_quote": "в соответствии с политикой в отношении связанных сторон"
+      },
+      "denominator": {
+        "include_keywords": [
+          "выручка"
+        ],
+        "include_keywords_quote": "выручки",
+        "exclude_keywords": [],
+        "exclude_keywords_quote": "",
+        "sign": "INFLOW",
+        "sign_quote": "за тот же период",
+        "apply_reclass": false,
+        "apply_reclass_quote": ""
+      },
+      "scope": "BORROWER",
+      "scope_quote": "Заёмщик",
+      "notes": "",
+      "notes_quote": ""
+    },
+    "notes": "совокупные Ограниченные платежи в пользу аффилированных лиц за период с 2025-01-01 по 2025-12-31 превышали 0.03x от выручки за тот же период",
+    "notes_quote": "совокупные Ограниченные платежи в пользу аффилированных лиц за период с 2025-01-01 по 2025-12-31 превышали 0.03x от выручки за тот же период",
+    "period_start": "2025-01-01",
+    "period_end": "2025-12-31",
+    "period_quote": "период с 2025-01-01 по 2025-12-31",
+    "springing": null
+  },
+  "usage": {
+    "prompt_tokens": 1549,
+    "completion_tokens": 369,
+    "total_tokens": 1918
+  },
+  "cost_usd": "0.00045375"
+}

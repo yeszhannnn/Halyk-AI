@@ -63,6 +63,7 @@ def _apply_adjustments(
     adjustments: dict[str, Any],
     *,
     scenario_accounts: dict[str, list[str]],
+    conflicts: list[dict[str, Any]],
 ) -> None:
     by_scenario: dict[str, list[dict[str, Any]]] = {}
     by_txn: dict[str, dict[str, Any]] = {}
@@ -111,7 +112,14 @@ def _apply_adjustments(
 
         if kind == "AMOUNT_FILL":
             if not matched_txn or matched_txn not in by_txn:
-                raise ValueError(f"AMOUNT_FILL {adj_id}: txn not found: {matched_txn}")
+                conflicts.append(
+                    {
+                        "kind": "ADJUSTMENT_TXN_NOT_FOUND",
+                        "adj_id": adj_id,
+                        "txn_id": matched_txn,
+                    },
+                )
+                continue
             row = by_txn[matched_txn]
             amount = _decimal_or_none(adj.get("amount"))
             if amount is None:
@@ -125,7 +133,14 @@ def _apply_adjustments(
 
         if kind in {"EXCLUDE", "CUTOFF"}:
             if not matched_txn or matched_txn not in by_txn:
-                raise ValueError(f"{kind} {adj_id}: txn not found: {matched_txn}")
+                conflicts.append(
+                    {
+                        "kind": "ADJUSTMENT_TXN_NOT_FOUND",
+                        "adj_id": adj_id,
+                        "txn_id": matched_txn,
+                    },
+                )
+                continue
             row = by_txn[matched_txn]
             row["excluded"] = True
             row["adjustment_ref"] = adj_id
@@ -133,7 +148,14 @@ def _apply_adjustments(
 
         if kind == "RECLASS":
             if not matched_txn or matched_txn not in by_txn:
-                raise ValueError(f"RECLASS {adj_id}: txn not found: {matched_txn}")
+                conflicts.append(
+                    {
+                        "kind": "ADJUSTMENT_TXN_NOT_FOUND",
+                        "adj_id": adj_id,
+                        "txn_id": matched_txn,
+                    },
+                )
+                continue
             row = by_txn[matched_txn]
             if adj.get("to_category"):
                 row["category"] = adj["to_category"]
@@ -177,6 +199,39 @@ def _apply_adjustments(
             )
 
 
+def _resolve_null_amounts(
+    rows: list[dict[str, Any]],
+    adjustments: dict[str, Any],
+    conflicts: list[dict[str, Any]],
+) -> None:
+    for row in rows:
+        value = row.get("amount_usd")
+        if value is not None and str(value).strip():
+            continue
+        txn_id = row.get("txn_id")
+        conflicts.append(
+            {
+                "kind": "BAD_AMOUNT",
+                "txn_id": txn_id,
+                "scenario_id": row.get("scenario_id"),
+            },
+        )
+        filled = False
+        for adj in adjustments.values():
+            if adj.get("kind") != "AMOUNT_FILL":
+                continue
+            matched_txn = adj.get("matched_txn") or adj.get("txn_id")
+            if matched_txn and str(matched_txn) == str(txn_id):
+                amount = _decimal_or_none(adj.get("amount"))
+                if amount is not None:
+                    row["amount_usd"] = str(-abs(amount))
+                    filled = True
+                    break
+        if not filled:
+            row["excluded"] = True
+            row["amount_usd"] = "0"
+
+
 def _assert_no_null_amounts(rows: list[dict[str, Any]]) -> None:
     for row in rows:
         value = row.get("amount_usd")
@@ -197,6 +252,7 @@ def run(*, work_dir: Path) -> StageResult:
     bind = _load_json(work_dir / "03_bound.json")
     adjustments_payload = _load_json(work_dir / "04c_adjustments.json")
     adjustments = adjustments_payload.get("adjustments") or {}
+    conflicts: list[dict[str, Any]] = []
 
     account_to_scenario = _account_to_scenario(bind)
     scenario_accounts = _build_scenario_accounts(bind)
@@ -260,7 +316,8 @@ def run(*, work_dir: Path) -> StageResult:
             }
         )
 
-    _apply_adjustments(rows, adjustments, scenario_accounts=scenario_accounts)
+    _apply_adjustments(rows, adjustments, scenario_accounts=scenario_accounts, conflicts=conflicts)
+    _resolve_null_amounts(rows, adjustments, conflicts)
     _assert_no_null_amounts(rows)
 
     output = pd.DataFrame(rows)[
@@ -293,5 +350,11 @@ def run(*, work_dir: Path) -> StageResult:
         )
     finally:
         con.close()
+
+    meta_path = work_dir / "05_ledger.json"
+    meta_path.write_text(
+        json.dumps({"conflicts": conflicts}, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
 
     return StageResult(item_count=len(rows), row_count=len(rows))

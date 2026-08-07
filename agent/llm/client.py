@@ -67,6 +67,66 @@ class RunCounter:
 
 RUN_COUNTER = RunCounter()
 
+REPLAY_DIR: Path | None = None
+RECORD_DIR: Path | None = None
+
+
+class ReplayMissError(RuntimeError):
+    """Raised in replay mode when no stored response exists for a prompt hash."""
+
+
+def set_replay_dir(path: Path | None) -> None:
+    global REPLAY_DIR
+    REPLAY_DIR = path
+
+
+def set_record_dir(path: Path | None) -> None:
+    global RECORD_DIR
+    RECORD_DIR = path
+
+
+def _fixture_path(cache_key: str, root: Path) -> Path:
+    return root / f"{cache_key}.json"
+
+
+def _read_fixture(
+    cache_key: str,
+    response_model: type[T],
+    counter: RunCounter,
+    *,
+    root: Path,
+) -> T:
+    path = _fixture_path(cache_key, root)
+    if not path.is_file():
+        raise ReplayMissError(f"no replay fixture for prompt hash {cache_key}")
+    cached = json.loads(path.read_text(encoding="utf-8"))
+    counter.cache_hits += 1
+    counter.prompt_tokens += int(cached.get("usage", {}).get("prompt_tokens", 0))
+    counter.completion_tokens += int(cached.get("usage", {}).get("completion_tokens", 0))
+    counter.total_tokens += int(cached.get("usage", {}).get("total_tokens", 0))
+    counter.cost_usd += Decimal(str(cached.get("cost_usd", "0")))
+    return response_model.model_validate(cached["response"])
+
+
+def _write_fixture(
+    cache_key: str,
+    *,
+    response: BaseModel,
+    usage: dict[str, int],
+    cost_usd: Decimal,
+    root: Path,
+) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "response": response.model_dump(mode="json"),
+        "usage": usage,
+        "cost_usd": str(cost_usd),
+    }
+    _fixture_path(cache_key, root).write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
 
 def _pricing_for_model(model: str) -> tuple[Decimal, Decimal]:
     if model in MODEL_PRICING_PER_MILLION:
@@ -301,13 +361,17 @@ class LLMClient:
             params=request_params,
         )
 
-        if use_cache:
+        if REPLAY_DIR is not None:
+            return _read_fixture(cache_key, response_model, self.counter, root=REPLAY_DIR)
+
+        if use_cache and RECORD_DIR is None:
             cached = _read_cache(cache_key, response_model, self.counter)
             if cached is not None:
                 return cached
 
         self.counter.cache_misses += 1
-        _ensure_budget()
+        if REPLAY_DIR is None:
+            _ensure_budget()
 
         parsed, completion = await self._request_with_retries(
             response_model=response_model,
@@ -321,6 +385,14 @@ class LLMClient:
             "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
         }
         cost = _record_usage(self.model, usage, self.counter)
+        if RECORD_DIR is not None:
+            _write_fixture(
+                cache_key,
+                response=parsed,
+                usage=usage_dict,
+                cost_usd=cost,
+                root=RECORD_DIR,
+            )
         if use_cache:
             _write_cache(
                 cache_key,
@@ -345,6 +417,9 @@ class LLMClient:
             messages=messages,
             **params,
         )
+        if REPLAY_DIR is not None:
+            return result
+
         payload = result.model_dump(mode="python")
         failed, should_retry = apply_quote_verification_with_retry(
             payload,
@@ -414,13 +489,17 @@ class LLMClient:
             image_digests=image_digests,
         )
 
-        if use_cache:
+        if REPLAY_DIR is not None:
+            return _read_fixture(cache_key, response_model, self.counter, root=REPLAY_DIR)
+
+        if use_cache and RECORD_DIR is None:
             cached = _read_cache(cache_key, response_model, self.counter)
             if cached is not None:
                 return cached
 
         self.counter.cache_misses += 1
-        _ensure_budget()
+        if REPLAY_DIR is None:
+            _ensure_budget()
 
         parsed, completion = await self._request_with_retries(
             response_model=response_model,
@@ -434,6 +513,14 @@ class LLMClient:
             "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
         }
         cost = _record_usage(self.model, usage, self.counter)
+        if RECORD_DIR is not None:
+            _write_fixture(
+                cache_key,
+                response=parsed,
+                usage=usage_dict,
+                cost_usd=cost,
+                root=RECORD_DIR,
+            )
         if use_cache:
             _write_cache(
                 cache_key,

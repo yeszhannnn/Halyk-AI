@@ -8,6 +8,7 @@ from pathlib import Path
 import pandas as pd
 
 from agent.stages import StageResult
+from agent.template import load_template, template_scenarios
 
 SCENARIO_ID_PATTERN = re.compile(r"^(P\d+|B\d+)$")
 
@@ -46,7 +47,10 @@ def run(*, work_dir: Path) -> StageResult:
 
     ledger = pd.read_csv(ledger_path)
     account_to_scenario = _derive_account_to_scenario(ledger)
-    scenario_ids = sorted(set(account_to_scenario.values()))
+    template = load_template(work_dir)
+    template_ids = set(template_scenarios(template))
+    ledger_ids = set(account_to_scenario.values())
+    scenario_ids = sorted(template_ids | ledger_ids)
 
     scenarios: dict[str, dict[str, str | None]] = {
         scenario_id: _empty_scenario_record() for scenario_id in scenario_ids
@@ -126,6 +130,44 @@ def run(*, work_dir: Path) -> StageResult:
                     "scenario_id": scenario_id,
                 },
             )
+        if scenarios[scenario_id]["audit_notes"] is None:
+            conflicts.append(
+                {
+                    "kind": "MISSING_AUDIT",
+                    "scenario_id": scenario_id,
+                },
+            )
+        if scenarios[scenario_id]["kyc"] is None:
+            conflicts.append(
+                {
+                    "kind": "MISSING_KYC",
+                    "scenario_id": scenario_id,
+                },
+            )
+
+    scenario_row_counts: dict[str, int] = {}
+    if not ledger.empty:
+        ledger_scenarios = ledger["txn_id"].astype(str).str.split("-").str[1]
+        scenario_row_counts = ledger_scenarios.value_counts().to_dict()
+    for scenario_id in scenario_ids:
+        if scenario_row_counts.get(scenario_id, 0) == 0:
+            conflicts.append(
+                {
+                    "kind": "EMPTY_LEDGER",
+                    "scenario_id": scenario_id,
+                },
+            )
+        if scenario_id in template_ids and scenario_id not in ledger_ids:
+            if not any(
+                conflict.get("kind") == "EXTRA_SCENARIO" and conflict.get("scenario_id") == scenario_id
+                for conflict in conflicts
+            ):
+                conflicts.append(
+                    {
+                        "kind": "EXTRA_SCENARIO",
+                        "scenario_id": scenario_id,
+                    },
+                )
 
     bound = {
         "account_to_scenario": account_to_scenario,

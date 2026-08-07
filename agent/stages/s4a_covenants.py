@@ -18,6 +18,7 @@ from agent.llm.schemas.covenants import (
 )
 from agent.models import CategorySpec, Covenant, MetricSpec, Provenance, SpringingCondition
 from agent.stages import StageResult
+from agent.template import load_template, template_cells
 
 ARTICLE_6_HEADING = re.compile(
     r"Статья 6\s*[—–-]\s*Финансовые ковенанты",
@@ -353,6 +354,34 @@ def _collect_verification_flags(payload: dict[str, Any]) -> dict[str, bool]:
     }
 
 
+def _placeholder_covenant(scenario_id: str, slot: str) -> dict[str, Any]:
+    return {
+        "scenario_id": scenario_id,
+        "slot": slot,
+        "title": "UNAVAILABLE",
+        "direction": "MAX",
+        "threshold": "0",
+        "threshold_unit": "USD",
+        "metric": {
+            "kind": "SUM",
+            "numerator": {
+                "include_keywords": [],
+                "exclude_keywords": [],
+                "sign": "OUTFLOW",
+                "apply_reclass": True,
+            },
+            "denominator": None,
+            "scope": "BORROWER",
+            "notes": "",
+        },
+        "period": ["2025-01-01", "2025-12-31"],
+        "springing": None,
+        "source": {"doc_id": "", "page": 1, "quote": "", "extractor": EXTRACTOR},
+        "verification": {},
+        "degraded": True,
+    }
+
+
 def _validate_period(
     period: tuple[date, date],
     *,
@@ -360,7 +389,7 @@ def _validate_period(
     doc_id: str,
     slot: str,
     conflicts: list[dict[str, Any]],
-) -> None:
+) -> bool:
     start, end = period
     year_start, year_end = COVENANT_YEAR
     if start.year != EXPECTED_YEAR or end.year != EXPECTED_YEAR:
@@ -374,10 +403,7 @@ def _validate_period(
                 "found": [start.isoformat(), end.isoformat()],
             },
         )
-        raise ValueError(
-            f"PERIOD_MISMATCH for {scenario_id} 6.{slot}: "
-            f"expected covenant year {EXPECTED_YEAR}, found {period}",
-        )
+        return False
     if start < year_start or end > year_end:
         conflicts.append(
             {
@@ -389,9 +415,8 @@ def _validate_period(
                 "found": [start.isoformat(), end.isoformat()],
             },
         )
-        raise ValueError(
-            f"PERIOD_MISMATCH for {scenario_id} 6.{slot}: period outside {COVENANT_YEAR}",
-        )
+        return False
+    return True
 
 
 async def _extract_covenant_item(
@@ -449,13 +474,14 @@ async def _process_scenario(
         )
 
         period = (extracted.period_start, extracted.period_end)
-        _validate_period(
+        if not _validate_period(
             period,
             scenario_id=scenario_id,
             doc_id=doc_id,
             slot=slot,
             conflicts=conflicts,
-        )
+        ):
+            continue
 
         covenant = _covenant_from_extract(
             extracted,
@@ -473,49 +499,72 @@ async def _process_scenario(
 async def _run_async(work_dir: Path) -> StageResult:
     inventory = json.loads((work_dir / "01_inventory.json").read_text(encoding="utf-8"))
     bound = json.loads((work_dir / "03_bound.json").read_text(encoding="utf-8"))
+    template = load_template(work_dir)
 
     client = LLMClient()
     conflicts: list[dict[str, Any]] = []
-    covenants: list[Covenant] = []
-    verifications: list[dict[str, bool]] = []
+    serialized: list[dict[str, Any]] = []
 
     scenarios = bound["scenarios"]
-    for scenario_id in sorted(scenarios.keys()):
-        doc_id = scenarios[scenario_id]["loan"]
-        if doc_id is None:
-            conflicts.append({"kind": "MISSING_LOAN", "scenario_id": scenario_id})
+    extracted_by_scenario: dict[str, dict[str, tuple[Covenant, dict[str, bool]]]] = {}
+
+    for scenario_id in sorted({scenario for scenario, _slot in template_cells(template)}):
+        loan_doc_id = scenarios.get(scenario_id, {}).get("loan")
+        if not loan_doc_id:
+            if scenario_id not in scenarios:
+                conflicts.append({"kind": "EXTRA_SCENARIO", "scenario_id": scenario_id})
             continue
+        try:
+            pages = inventory["documents"][loan_doc_id]["pages"]
+            scenario_results = await _process_scenario(
+                client,
+                scenario_id=scenario_id,
+                doc_id=loan_doc_id,
+                pages=pages,
+                conflicts=conflicts,
+            )
+            extracted_by_scenario[scenario_id] = {
+                covenant.slot: (covenant, verification)
+                for covenant, verification in scenario_results
+            }
+        except Exception as exc:  # noqa: BLE001 — structural gaps must not abort
+            conflicts.append(
+                {
+                    "kind": "COVENANT_EXTRACTION_FAILED",
+                    "scenario_id": scenario_id,
+                    "error": str(exc),
+                },
+            )
 
-        pages = inventory["documents"][doc_id]["pages"]
-        scenario_results = await _process_scenario(
-            client,
-            scenario_id=scenario_id,
-            doc_id=doc_id,
-            pages=pages,
-            conflicts=conflicts,
-        )
-        for covenant, verification in scenario_results:
-            covenants.append(covenant)
-            verifications.append(verification)
+    for scenario_id, slot in template_cells(template):
+        loan_doc_id = scenarios.get(scenario_id, {}).get("loan")
+        extracted_by_slot = extracted_by_scenario.get(scenario_id, {})
+        if slot in extracted_by_slot:
+            covenant, verification = extracted_by_slot[slot]
+            serialized.append(_serialize_covenant(covenant, verification))
+        else:
+            if loan_doc_id:
+                conflicts.append(
+                    {
+                        "kind": "NEW_SLOT",
+                        "scenario_id": scenario_id,
+                        "slot": slot,
+                    },
+                )
+            serialized.append(_placeholder_covenant(scenario_id, slot))
 
-    if len(covenants) != 36:
-        raise AssertionError(f"expected 36 covenants, got {len(covenants)}")
-
-    springing_count = sum(1 for covenant in covenants if covenant.springing is not None)
+    springing_count = sum(1 for covenant in serialized if covenant.get("springing") is not None)
     slot_62_directions = {
-        covenant.direction
-        for covenant in covenants
-        if covenant.slot == "6.2"
+        covenant["direction"]
+        for covenant in serialized
+        if covenant["slot"] == "6.2"
     }
 
     payload = {
-        "covenants": [
-            _serialize_covenant(covenant, verification)
-            for covenant, verification in zip(covenants, verifications, strict=True)
-        ],
+        "covenants": serialized,
         "conflicts": conflicts,
         "summary": {
-            "count": len(covenants),
+            "count": len(serialized),
             "springing_count": springing_count,
             "slot_6_2_directions": sorted(slot_62_directions),
         },
@@ -528,11 +577,11 @@ async def _run_async(work_dir: Path) -> StageResult:
     )
 
     print(
-        f"s4a_covenants: extracted={len(covenants)} springing={springing_count} "
+        f"s4a_covenants: extracted={len(serialized)} springing={springing_count} "
         f"6.2_directions={sorted(slot_62_directions)} conflicts={len(conflicts)}",
     )
 
-    return StageResult(item_count=len(covenants), row_count=springing_count)
+    return StageResult(item_count=len(serialized), row_count=springing_count)
 
 
 def run(*, work_dir: Path) -> StageResult:

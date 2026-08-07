@@ -1,0 +1,31 @@
+txn_id,date,account_id,counterparty,description,amount,currency
+TXN-P1-0045,2025-08-12,ACC-7801,Kaspi Marine Engineering LLP,Quay wall inspection and survey servicing contract,-612884.19,USD
+TXN-P1-0007,2025-01-02,ACC-7801,Hartley Building Services Holdings (Turkistan point),Plant and boiler insurance premium — Taraz site 2025,-11065870.19,USD
+TXN-P1-0012,2025-01-03,ACC-7801,Ironwood Power Trust Enterprise (Karaganda yard),Payroll for laboratory staff — April 2025,-1604249.66,USD
+TXN-P1-0002,2025-01-11,ACC-7801,Foxridge Tax Advisory Corp (Semey base),"Telecom leased line — Kostanay centre, February 2025",-1474435.73,USD
+TXN-P1-0032,2025-01-12,ACC-7801,Eastgate Janitorial Partners (Ekibastuz block B),"Default interest charge — Almaty office, instalment 1 2025",-654151.88,USD
+TXN-P1-0037,2025-01-28,ACC-7801,Ashford Property Co (Taraz site),"Interest on trade facility — Atyrau terminal, November 2025",-6453942.7,USD
+TXN-P1-0026,2025-01-29,ACC-7801,Foxridge Stationery (Zhezkazgan compound),Standby generator electricity — Pavlodar block,-1585834.81,USD
+TXN-P1-0041,2025-02-18,ACC-7801,Hartley Catering LP (Kostanay centre),"Electricity network capacity charge — Uralsk annex, instalment 3",-315103.3,USD
+TXN-P1-0025,2025-02-27,ACC-7801,Harborview Properties (Turkistan point),Sponsorship marketing of regional sports club 2025,-214382.05,USD
+TXN-P1-0050,2025-02-27,ACC-7801,Bridgeport Water Works LP,Payroll for night shift — Q1,-10611759.48,USD
+TXN-P1-0052,2025-03-03,ACC-7801,Bridgeport Courier Solutions (Astana branch),"Digital media buy — search — Karaganda yard, instalment 3 2025",-379368.05,USD
+TXN-P1-0014,2025-03-05,ACC-7801,Aktau Terminal Properties LLP,Terminal land lease payments 2025,-918443.27,USD
+TXN-P1-0028,2025-03-08,ACC-7801,Eastgate Utility LLC Group,"Utility deposit returned — Almaty office, period 02",3575522.74,USD
+TXN-P1-0047,2025-03-08,ACC-7801,Ironwood Stationery Solutions Trading House,"Environmental liability insurance — Uralsk annex, instalment 2 2025",-2697744.03,USD
+TXN-P1-0022,2025-03-13,ACC-7801,Juniper Printing Inc Supply (Turkistan point),Municipal tax levy — instalment 2 2025,-593594.68,USD
+TXN-P2-0040,2025-07-15,ACC-7802,Tien Shan Advisory Bureau,Advisory engagement on depot operations,-1104663.28,USD
+TXN-P2-0006,2025-01-09,ACC-7802,Bridgeport Power Corp (Semey base),Property tax payment — Oskemen unit,-2125991.67,USD
+TXN-P2-0017,2025-01-09,ACC-7802,Dunmore Realty (Kyzylorda station),"Printed marketing collateral run — Uralsk annex, January 2025",-3249662.49,USD
+TXN-P2-0019,2025-01-30,ACC-7802,Eastgate Office Supplies Solutions,"Overdraft interest — Kyzylorda station, September 2025",-1143345.59,USD
+TXN-P2-0030,2025-02-11,ACC-7802,Dunmore Uniforms Holdings,Office rent — period 02,-1054367.22,USD
+TXN-P2-0008,2025-02-12,ACC-7802,Bridgeport Tax Advisory Services Supply,Customer newsletter marketing production — Zhezkazgan compound 2025,-302754.71,EUR
+TXN-P2-0037,2025-02-16,ACC-7802,Trident Power Cooperative (Taraz site),"VAT refund received — Turkistan point, April",5814535.19,USD
+TXN-P2-0028,2025-02-19,ACC-7802,Development Bank of Kazakhstan JSC,Term loan facility drawdown for cold store expansion,4882117.46,USD
+TXN-P2-0056,2025-02-25,ACC-7802,Cedarville Waste Systems Inc (Atyrau terminal),"Media buy rate adjustment credit — Kyzylorda station, November",485636.32,USD
+TXN-P2-0021,2025-03-06,ACC-7802,Ironwood Stationery Solutions (Uralsk annex),Parking garage lease — Kostanay centre 2025,-11913971.27,USD
+TXN-P2-0055,2025-03-08,ACC-7802,Bridgeport Office Supplies,Marketing co-operative funding received — June 2025,7382549.74,USD
+TXN-P2-0002,2025-03-10,ACC-7802,Bridgeport Security Associates Enterprise,Electricity network capacity charge — November,-421881.82,USD
+TXN-P2-0039,2025-03-20,ACC-7802,Cedarville Courier Holdings Supply,"Rent overpayment refunded — Kyzylorda station, January 2025",803966.93,USD
+TXN-P2-0022,2025-03-25,ACC-7802,Dunmore Tax Advisory Group JSC (Karaganda yard),Interest credited on current account — Kostanay centre 2025,2083129.43,USD
+TXN-P2-0033,2025-04-02,ACC-7802,Eastgate Stationery LLC Enterprise,"Municipal tax levy — Almaty office, Q1",-2212134.41,USD

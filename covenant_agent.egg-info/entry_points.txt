@@ -1,0 +1,2 @@
+[console_scripts]
+covenant = agent.cli:main

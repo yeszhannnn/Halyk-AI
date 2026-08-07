@@ -1,0 +1,41 @@
+{
+  "team": "",
+  "contact_email": "",
+  "model": "",
+  "answers": {
+    "P1": {
+      "6.1": {
+        "status": null,
+        "actual": null,
+        "evidence_txn_id": null
+      },
+      "6.2": {
+        "status": null,
+        "actual": null,
+        "evidence_txn_id": null
+      },
+      "6.3": {
+        "status": null,
+        "actual": null,
+        "evidence_txn_id": null
+      }
+    },
+    "P2": {
+      "6.1": {
+        "status": null,
+        "actual": null,
+        "evidence_txn_id": null
+      },
+      "6.2": {
+        "status": null,
+        "actual": null,
+        "evidence_txn_id": null
+      },
+      "6.3": {
+        "status": null,
+        "actual": null,
+        "evidence_txn_id": null
+      }
+    }
+  }
+}

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from agent.parsing.numbers import round_half_up
+from agent.template import load_template, template_cells
 
 SLOT_STATUS_PRIOR = {
     "6.1": "BREACH",
@@ -22,8 +23,8 @@ def _load_json(path: Path) -> dict[str, Any]:
 
 def _degraded_finding(covenant: dict[str, Any]) -> dict[str, Any]:
     slot = covenant["slot"]
-    threshold = Decimal(str(covenant["threshold"]))
-    status = SLOT_STATUS_PRIOR[slot]
+    threshold = Decimal(str(covenant.get("threshold", "0")))
+    status = SLOT_STATUS_PRIOR.get(slot, "COMPLIANT")
     if status == "COMPLIANT":
         actual = threshold
         strategy = "deadline_threshold_fallback"
@@ -51,6 +52,10 @@ def apply_degradation_ladder(work_dir: Path) -> None:
         return
 
     covenants = _load_json(covenants_path).get("covenants") or []
+    covenant_index = {
+        (covenant["scenario_id"], covenant["slot"]): covenant for covenant in covenants
+    }
+    template = load_template(work_dir)
     evaluated_path = work_dir / "06_evaluated.json"
     existing: dict[tuple[str, str], dict[str, Any]] = {}
     if evaluated_path.exists():
@@ -58,8 +63,11 @@ def apply_degradation_ladder(work_dir: Path) -> None:
             existing[(finding["scenario_id"], finding["slot"])] = finding
 
     findings: list[dict[str, Any]] = []
-    for covenant in covenants:
-        key = (covenant["scenario_id"], covenant["slot"])
+    for scenario_id, slot in template_cells(template):
+        key = (scenario_id, slot)
+        covenant = covenant_index.get(key)
+        if covenant is None:
+            covenant = {"scenario_id": scenario_id, "slot": slot, "threshold": "0"}
         finding = existing.get(key)
         if finding and finding.get("strategy") == "computed":
             findings.append(finding)

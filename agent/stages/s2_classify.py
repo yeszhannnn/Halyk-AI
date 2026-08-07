@@ -79,6 +79,9 @@ def _print_summary_table(counts: Counter[str], *, pdf_total: int) -> None:
     print(f"{'TOTAL':<18} {pdf_total:>6}")
 
 
+OCR_TEXT_THRESHOLD = 100
+
+
 def run(*, work_dir: Path) -> StageResult:
     inventory_path = work_dir / "01_inventory.json"
     inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
@@ -86,6 +89,7 @@ def run(*, work_dir: Path) -> StageResult:
 
     classified: dict[str, dict] = {}
     pdf_counts: Counter[str] = Counter()
+    conflicts: list[dict] = []
 
     for doc_id, doc in documents_in.items():
         text = _document_text(doc["pages"])
@@ -101,9 +105,26 @@ def run(*, work_dir: Path) -> StageResult:
         if doc_type == "AUDIT_PLANNING":
             record["exclude_from_extraction"] = True
 
-        classified[doc_id] = record
         if record["file_type"] == "pdf":
             pdf_counts[doc_type] += 1
+            if doc_type == "NOISE" and acc_ids:
+                conflicts.append({"kind": "UNMARKED_PDF", "doc_id": doc_id})
+            ocr_page_nums = {
+                int(entry["page_number"])
+                for entry in doc.get("ocr_pages") or []
+                if isinstance(entry, dict) and "page_number" in entry
+            }
+            for page_number, page_text in enumerate(doc["pages"], start=1):
+                if len(page_text.strip()) < OCR_TEXT_THRESHOLD and page_number not in ocr_page_nums:
+                    conflicts.append(
+                        {
+                            "kind": "NO_OCR",
+                            "doc_id": doc_id,
+                            "page": page_number,
+                        },
+                    )
+
+        classified[doc_id] = record
 
     pdf_total = sum(pdf_counts.values())
     _print_summary_table(pdf_counts, pdf_total=pdf_total)
@@ -123,6 +144,7 @@ def run(*, work_dir: Path) -> StageResult:
 
     output = {
         "documents": classified,
+        "conflicts": conflicts,
         "summary": {
             "pdf_counts": dict(pdf_counts),
             "pdf_total": pdf_total,

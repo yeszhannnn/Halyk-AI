@@ -1,0 +1,36 @@
+{
+  "response": {
+    "header_account": "ACC-7801",
+    "header_account_quote": "Счёт ACC-7801",
+    "ownership_rows": [
+      {
+        "counterparty": "Aktau Holdings LLP",
+        "counterparty_quote": "Aktau Holdings LLP",
+        "ownership_pct": "34.5",
+        "ownership_pct_quote": "34.5%"
+      },
+      {
+        "counterparty": "Kaspi Marine Engineering LLP",
+        "counterparty_quote": "Kaspi Marine Engineering LLP",
+        "ownership_pct": "18.7",
+        "ownership_pct_quote": "18.7%"
+      },
+      {
+        "counterparty": "Ural Crane Works LLP",
+        "counterparty_quote": "Ural Crane Works LLP",
+        "ownership_pct": "6.2",
+        "ownership_pct_quote": "6.2%"
+      }
+    ],
+    "table_semantics": "RELATED_PARTY",
+    "table_semantics_quote": "Организации, в которых Группа владеет 20.0% и более голосующих прав, признаются связанными сторонами для целей Договора.",
+    "threshold_pct": "20",
+    "threshold_quote": "20.0%"
+  },
+  "usage": {
+    "prompt_tokens": 2016,
+    "completion_tokens": 189,
+    "total_tokens": 2205
+  },
+  "cost_usd": "0.0004158"
+}

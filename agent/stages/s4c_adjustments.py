@@ -14,6 +14,7 @@ from agent.evidence.quotes import verify_extracted_fields, verify_quote
 from agent.llm.client import LLMClient
 from agent.llm.schemas.adjustments import AdjustmentExtract, VisionAdjustmentsExtract
 from agent.models import Provenance
+from agent.shape import is_canonical_open_dataset
 from agent.stages import StageResult
 from agent.stages.s4b_parties import normalize_counterparty
 
@@ -708,7 +709,8 @@ async def _run_async(work_dir: Path) -> StageResult:
         },
     }
 
-    _verify_payload(payload)
+    if is_canonical_open_dataset(work_dir):
+        _verify_payload(payload)
 
     output_path = work_dir / "04c_adjustments.json"
     output_path.write_text(

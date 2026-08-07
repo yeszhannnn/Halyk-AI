@@ -1,0 +1,45 @@
+{
+  "response": {
+    "title": "Максимальные платежи связанным сторонам",
+    "title_quote": "Максимальные платежи связанным сторонам",
+    "direction": "MAX",
+    "direction_quote": "не допускать, чтобы совокупный объём платежей... превышал",
+    "threshold": "450000",
+    "threshold_quote": "$450,000.00",
+    "threshold_unit": "USD",
+    "threshold_unit_quote": "$",
+    "metric": {
+      "kind": "SUM",
+      "kind_quote": "совокупный объём платежей",
+      "numerator": {
+        "include_keywords": [
+          "платежи"
+        ],
+        "include_keywords_quote": "платежей в пользу связанных сторон",
+        "exclude_keywords": [],
+        "exclude_keywords_quote": "",
+        "sign": "INFLOW",
+        "sign_quote": "в пользу",
+        "apply_reclass": false,
+        "apply_reclass_quote": ""
+      },
+      "denominator": null,
+      "scope": "BORROWER",
+      "scope_quote": "Заёмщик, Aktau Port Services JSC",
+      "notes": "",
+      "notes_quote": ""
+    },
+    "notes": "Совокупный объём платежей в пользу связанных сторон за период с 2025-01-01 по 2025-12-31.",
+    "notes_quote": "совокупный объём платежей в пользу связанных сторон за период с 2025-01-01 по 2025-12-31.",
+    "period_start": "2025-01-01",
+    "period_end": "2025-12-31",
+    "period_quote": "период с 2025-01-01 по 2025-12-31",
+    "springing": null
+  },
+  "usage": {
+    "prompt_tokens": 1511,
+    "completion_tokens": 276,
+    "total_tokens": 1787
+  },
+  "cost_usd": "0.00039225"
+}

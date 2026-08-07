@@ -1,0 +1,46 @@
+{
+  "response": {
+    "title": "Минимальная выручка по категории",
+    "title_quote": "Минимальная выручка по категории",
+    "direction": "MIN",
+    "direction_quote": "не менее",
+    "threshold": "7100000",
+    "threshold_quote": "$7,100,000.00",
+    "threshold_unit": "USD",
+    "threshold_unit_quote": "USD",
+    "metric": {
+      "kind": "SUM",
+      "kind_quote": "совокупный объём таких поступлений",
+      "numerator": {
+        "include_keywords": [
+          "поступления",
+          "выручка"
+        ],
+        "include_keywords_quote": "поступления по статье «Выручка»",
+        "exclude_keywords": [],
+        "exclude_keywords_quote": "",
+        "sign": "INFLOW",
+        "sign_quote": "поступления",
+        "apply_reclass": true,
+        "apply_reclass_quote": "с учётом переквалификаций, произведённых аудиторами Заёмщика"
+      },
+      "denominator": null,
+      "scope": "BORROWER",
+      "scope_quote": "аудированной финансовой отчётности Заёмщика",
+      "notes": "",
+      "notes_quote": ""
+    },
+    "notes": "Aktau Port Services JSC обязуется поддерживать совокупный объём таких поступлений за период с 2025-01-01 по 2025-12-31",
+    "notes_quote": "поддерживать совокупный объём таких поступлений за период с 2025-01-01 по 2025-12-31",
+    "period_start": "2025-01-01",
+    "period_end": "2025-12-31",
+    "period_quote": "за период с 2025-01-01 по 2025-12-31",
+    "springing": null
+  },
+  "usage": {
+    "prompt_tokens": 1494,
+    "completion_tokens": 293,
+    "total_tokens": 1787
+  },
+  "cost_usd": "0.0003999"
+}

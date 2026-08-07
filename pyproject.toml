@@ -19,6 +19,9 @@ dependencies = [
     "pytest",
 ]
 
+[project.scripts]
+covenant = "agent.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["agent*"]

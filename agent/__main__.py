@@ -12,6 +12,7 @@ from pathlib import Path
 
 from agent.config import DEADLINE, MODEL_ID, TEMPERATURE
 from agent.degrade import apply_degradation_ladder
+from agent.preflight import print_preflight_report, run_preflight
 from agent.stages import StageResult
 from agent.stages import s1_ingest, s2_classify, s3_bind, s4_extract, s5_ledger, s6_evaluate, s7_emit
 
@@ -104,7 +105,7 @@ def _run_stage(spec: StageSpec, *, input_dir: Path, work_dir: Path, output_path:
     return spec.run(work_dir=work_dir)
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def _build_pipeline_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Covenant checking agent pipeline")
     parser.add_argument(
         "--input",
@@ -123,7 +124,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="Re-run stages even when output artifacts already exist",
     )
-    args = parser.parse_args(argv)
+    return parser
+
+
+def _run_pipeline(argv: Sequence[str]) -> int:
+    args = _build_pipeline_parser().parse_args(argv)
 
     input_dir: Path = args.input
     output_path: Path = args.out
@@ -160,7 +165,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 mode=mode,
                 started_at=started_at,
             )
-        except NotImplementedError as exc:
+        except Exception as exc:  # noqa: BLE001 — structural failures must not abort the run
             elapsed_ms = int((time.perf_counter() - started) * 1000)
             print(f"{spec.name}: failed after {elapsed_ms}ms", file=sys.stderr)
             print(str(exc), file=sys.stderr)
@@ -210,6 +215,34 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
 
     return 0
+
+
+def _run_preflight(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(
+        description="Run stages 1–3 and print a shape report before LLM spend",
+    )
+    parser.add_argument(
+        "--input",
+        type=Path,
+        required=True,
+        help="Input data directory (e.g. data/open)",
+    )
+    args = parser.parse_args(argv)
+
+    if not args.input.is_dir():
+        print(f"error: input directory not found: {args.input}", file=sys.stderr)
+        return 1
+
+    report = run_preflight(args.input)
+    print_preflight_report(report)
+    return 0
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["preflight"]:
+        return _run_preflight(argv[1:])
+    return _run_pipeline(argv)
 
 
 if __name__ == "__main__":

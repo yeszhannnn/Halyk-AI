@@ -1,0 +1,45 @@
+{
+  "response": {
+    "title": "Минимальная выручка по категории",
+    "title_quote": "Минимальная выручка по категории",
+    "direction": "MIN",
+    "direction_quote": "не менее",
+    "threshold": "7100000",
+    "threshold_quote": "не менее $7,100,000.00",
+    "threshold_unit": "USD",
+    "threshold_unit_quote": "$",
+    "metric": {
+      "kind": "SUM",
+      "kind_quote": "совокупный объём таких поступлений",
+      "numerator": {
+        "include_keywords": [
+          "выручка"
+        ],
+        "include_keywords_quote": "«Выручка»",
+        "exclude_keywords": [],
+        "exclude_keywords_quote": "",
+        "sign": "INFLOW",
+        "sign_quote": "поступлениями",
+        "apply_reclass": true,
+        "apply_reclass_quote": "с учётом переквалификаций, произведённых аудиторами Заёмщика для целей соблюдения ковенантов."
+      },
+      "denominator": null,
+      "scope": "BORROWER",
+      "scope_quote": "аудированной финансовой отчётности Заёмщика",
+      "notes": "",
+      "notes_quote": ""
+    },
+    "notes": "поддерживать совокупный объём поступлений по статье «Выручка»",
+    "notes_quote": "поддерживать совокупный объём таких поступлений",
+    "period_start": "2025-01-01",
+    "period_end": "2025-12-31",
+    "period_quote": "за период с 2025-01-01 по 2025-12-31",
+    "springing": null
+  },
+  "usage": {
+    "prompt_tokens": 1526,
+    "completion_tokens": 258,
+    "total_tokens": 1784
+  },
+  "cost_usd": "0.0003837"
+}

@@ -14,6 +14,7 @@ from agent.evidence.quotes import verify_extracted_fields, verify_quote
 from agent.llm.client import LLMClient
 from agent.llm.schemas.parties import KycPartiesExtract
 from agent.models import Provenance, RelatedParty
+from agent.shape import is_canonical_open_dataset
 from agent.stages import StageResult
 
 HEADER_ACCOUNT_PATTERN = re.compile(r"Сч[её]т\s+(ACC-\d+)", re.IGNORECASE)
@@ -788,7 +789,8 @@ async def _run_async(work_dir: Path) -> StageResult:
         },
     }
 
-    _verify_payload(payload, ledger=ledger, ground_truth=ground_truth)
+    if is_canonical_open_dataset(work_dir):
+        _verify_payload(payload, ledger=ledger, ground_truth=ground_truth)
 
     output_path = work_dir / "04b_parties.json"
     output_path.write_text(

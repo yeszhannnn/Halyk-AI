@@ -1,0 +1,22 @@
+{
+  "scenarios": [
+    "P1",
+    "P2"
+  ],
+  "documents": {
+    "P1": {
+      "loan": "8d878af064f2",
+      "kyc": "2dd8671ac405",
+      "audit_notes": "896b7933db48",
+      "account": "ACC-7801"
+    },
+    "P2": {
+      "loan": "b2519c8e3ea4",
+      "kyc": "63e162bd710b",
+      "audit_notes": "3fd0d34546b5",
+      "account": "ACC-7802"
+    }
+  },
+  "ledger_rows": 30,
+  "ocr_doc": "63e162bd710b"
+}

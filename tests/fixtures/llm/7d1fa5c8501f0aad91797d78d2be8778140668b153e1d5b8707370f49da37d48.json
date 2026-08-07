@@ -1,0 +1,24 @@
+{
+  "response": {
+    "header_account": "ACC-7802",
+    "header_account_quote": "Счёт ACC-7802",
+    "ownership_rows": [
+      {
+        "counterparty": "Almaty Cold Chain JSC",
+        "counterparty_quote": "Организация Almaty Cold Chain JSC",
+        "ownership_pct": "100",
+        "ownership_pct_quote": "100%"
+      }
+    ],
+    "table_semantics": "RELATED_PARTY",
+    "table_semantics_quote": "Проверка связанных сторон · Almaty Cold Chain JSC",
+    "threshold_pct": "0",
+    "threshold_quote": "Проверка связанных сторон · Almaty Cold Chain JSC"
+  },
+  "usage": {
+    "prompt_tokens": 1901,
+    "completion_tokens": 113,
+    "total_tokens": 2014
+  },
+  "cost_usd": "0.00035295"
+}

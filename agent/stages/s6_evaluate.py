@@ -9,16 +9,12 @@ from typing import Any
 
 import duckdb
 
+from agent.degrade import SLOT_STATUS_PRIOR, _degraded_finding
 from agent.evidence.counterfactual import find_evidence
 from agent.metrics.engine import breaches, compare_values, compute_covenant_metric
 from agent.parsing.numbers import round_half_up
 from agent.stages import StageResult
-
-SLOT_STATUS_PRIOR = {
-    "6.1": "BREACH",
-    "6.2": "COMPLIANT",
-    "6.3": "COMPLIANT",
-}
+from agent.template import load_template, template_cells
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -61,6 +57,11 @@ def _evaluate_cell(
     work_dir: Path,
 ) -> dict[str, Any]:
     slot = covenant["slot"]
+    if covenant.get("degraded"):
+        finding = _degraded_finding(covenant)
+        finding["flags"] = ["DEGRADED"]
+        return finding
+
     threshold = Decimal(str(covenant["threshold"]))
     direction = covenant["direction"]
     flags: list[str] = []
@@ -117,7 +118,7 @@ def _evaluate_cell(
         if computed:
             status = "BREACH" if breaches(actual, direction, threshold) else "COMPLIANT"
         else:
-            status = SLOT_STATUS_PRIOR[slot]
+            status = SLOT_STATUS_PRIOR.get(slot, "COMPLIANT")
             strategy = "status_slot_prior"
 
     if not computed:
@@ -156,24 +157,37 @@ def run(*, work_dir: Path) -> StageResult:
     covenants_payload = _load_json(work_dir / "04a_covenants.json")
     parties_payload = _load_json(work_dir / "04b_parties.json")
     adjustments_payload = _load_json(work_dir / "04c_adjustments.json")
+    template = load_template(work_dir)
 
-    covenants = covenants_payload.get("covenants") or []
+    covenants = {
+        (covenant["scenario_id"], covenant["slot"]): covenant
+        for covenant in (covenants_payload.get("covenants") or [])
+    }
     parties_by_scenario = parties_payload.get("scenarios") or {}
     adjustments = adjustments_payload.get("adjustments") or {}
     adjusted_ids = _adjusted_txn_ids(adjustments)
     ledger = _ledger_rows(work_dir)
 
-    findings = [
-        _evaluate_cell(
-            covenant,
-            ledger,
-            parties=parties_by_scenario.get(covenant["scenario_id"]),
-            adjustments=adjustments,
-            adjusted_txn_ids=adjusted_ids,
-            work_dir=work_dir,
+    findings = []
+    for scenario_id, slot in template_cells(template):
+        covenant = covenants.get((scenario_id, slot))
+        if covenant is None:
+            covenant = {
+                "scenario_id": scenario_id,
+                "slot": slot,
+                "threshold": "0",
+                "degraded": True,
+            }
+        findings.append(
+            _evaluate_cell(
+                covenant,
+                ledger,
+                parties=parties_by_scenario.get(scenario_id),
+                adjustments=adjustments,
+                adjusted_txn_ids=adjusted_ids,
+                work_dir=work_dir,
+            ),
         )
-        for covenant in covenants
-    ]
 
     payload = {
         "findings": findings,

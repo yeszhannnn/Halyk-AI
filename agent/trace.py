@@ -15,6 +15,7 @@ from typing import Any
 import duckdb
 
 from agent.config import CONTACT_EMAIL, MODEL_ID, TEMPERATURE
+from agent.template import load_template, template_cells
 from agent.evidence.counterfactual import evidence_search
 from agent.evidence.quotes import verify_quote
 from agent.metrics.engine import (
@@ -257,7 +258,14 @@ def _trace_adjustments(adjustments: dict[str, Any]) -> dict[str, Any]:
 
 def _aggregate_conflicts(work_dir: Path) -> list[dict[str, Any]]:
     conflicts: list[dict[str, Any]] = []
-    for name in ("03_bound.json", "04a_covenants.json", "04b_parties.json", "04c_adjustments.json"):
+    for name in (
+        "02_classified.json",
+        "03_bound.json",
+        "04a_covenants.json",
+        "04b_parties.json",
+        "04c_adjustments.json",
+        "05_ledger.json",
+    ):
         path = work_dir / name
         if not path.exists():
             continue
@@ -379,16 +387,23 @@ def build_trace(
     adjustments_payload = _load_json(work_dir / "04c_adjustments.json")
     evaluated_payload = _load_json(work_dir / "06_evaluated.json")
 
-    covenants = covenants_payload.get("covenants") or []
+    covenants = {
+        (covenant["scenario_id"], covenant["slot"]): covenant
+        for covenant in (covenants_payload.get("covenants") or [])
+    }
     parties_by_scenario = parties_payload.get("scenarios") or {}
     adjustments = adjustments_payload.get("adjustments") or {}
     adjusted_ids = _adjusted_txn_ids(adjustments)
     ledger = _ledger_rows(work_dir)
     findings = _finding_map(evaluated_payload)
+    template = load_template(work_dir)
 
     cells: list[dict[str, Any]] = []
-    for covenant in covenants:
-        key = (covenant["scenario_id"], covenant["slot"])
+    for scenario_id, slot in template_cells(template):
+        covenant = covenants.get((scenario_id, slot))
+        if covenant is None:
+            continue
+        key = (scenario_id, slot)
         finding = findings[key]
         evaluated = _d(finding["actual"])
         rounded = _d(finding["rounded"])
@@ -504,18 +519,20 @@ def verify(trace: dict[str, Any], *, work_dir: Path, template: dict[str, Any]) -
         threshold = _d(covenant.get("threshold"))
         direction = covenant.get("direction", "MAX")
         status = cell.get("status")
-        expected_status = "BREACH" if breaches(evaluated, direction, threshold) else "COMPLIANT"
-        if status != expected_status:
-            raise ValueError(
-                f"comparison/status mismatch for {cell['scenario_id']} {cell['slot']}: "
-                f"status={status} expected={expected_status}",
-            )
+        strategy = cell.get("strategy", "computed")
+        if strategy in {"computed", "springing_not_triggered"}:
+            expected_status = "BREACH" if breaches(evaluated, direction, threshold) else "COMPLIANT"
+            if status != expected_status:
+                raise ValueError(
+                    f"comparison/status mismatch for {cell['scenario_id']} {cell['slot']}: "
+                    f"status={status} expected={expected_status}",
+                )
 
-        comparison = str(computation.get("comparison", ""))
-        if status not in comparison:
-            raise ValueError(
-                f"comparison string missing status for {cell['scenario_id']} {cell['slot']}",
-            )
+            comparison = str(computation.get("comparison", ""))
+            if status not in comparison:
+                raise ValueError(
+                    f"comparison string missing status for {cell['scenario_id']} {cell['slot']}",
+                )
 
         evidence = cell.get("evidence_txn_id")
         if evidence is not None and str(evidence) not in ledger_txn_ids:
@@ -554,7 +571,6 @@ def project(trace: dict[str, Any], template: dict[str, Any]) -> dict[str, Any]:
 
 
 def load_template(work_dir: Path) -> dict[str, Any]:
-    path = work_dir / "submission_template.json"
-    if not path.exists():
-        raise FileNotFoundError(f"submission template not found: {path}")
-    return _load_json(path)
+    from agent.template import load_template as _load_template
+
+    return _load_template(work_dir)

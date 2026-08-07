@@ -1,0 +1,36 @@
+{
+  "response": {
+    "header_account": "ACC-63e162bd710b",
+    "header_account_quote": "Счёт ACC-63e162bd710b",
+    "ownership_rows": [
+      {
+        "counterparty": "Almaty Chill Logistics LLP",
+        "counterparty_quote": "Almaty Chill Logistics LLP",
+        "ownership_pct": "8.6",
+        "ownership_pct_quote": "8.6%"
+      },
+      {
+        "counterparty": "Tien Shan Advisory Bureau",
+        "counterparty_quote": "Tien Shan Advisory Bureau",
+        "ownership_pct": "23.4",
+        "ownership_pct_quote": "23.4%"
+      },
+      {
+        "counterparty": "Zhetysu Capital Partners LLP",
+        "counterparty_quote": "Zhetysu Capital Partners LLP",
+        "ownership_pct": "31.2",
+        "ownership_pct_quote": "31.2%"
+      }
+    ],
+    "table_semantics": "RELATED_PARTY",
+    "table_semantics_quote": "Организации, в которых Группа владеет 25.0% и более голосующих прав, признаются связанными сторонами для целей Договора.",
+    "threshold_pct": "25",
+    "threshold_quote": "25.0%"
+  },
+  "usage": {
+    "prompt_tokens": 37628,
+    "completion_tokens": 205,
+    "total_tokens": 37833
+  },
+  "cost_usd": "0.0057672"
+}
