@@ -20,6 +20,7 @@ WIDE_LEG_REVIEW = "WIDE_LEG_REVIEW"
 SCENARIO_SCOPE_VIOLATION = "SCENARIO_SCOPE_VIOLATION"
 LEG_SUBTOTAL_MISMATCH = "LEG_SUBTOTAL_MISMATCH"
 ADJUSTMENT_APPLIED_TWICE = "ADJUSTMENT_APPLIED_TWICE"
+IDENTICAL_LEGS = "IDENTICAL_LEGS"
 
 FUNDING_EXCLUSION_MARKERS = (
     "refund",
@@ -44,6 +45,7 @@ FUNDING_EXCLUSION_MARKERS = (
     "insurance deductible recovery",
     "payroll advance recovered",
     "interest on escrow",
+    "incentive",
 )
 
 
@@ -216,7 +218,10 @@ def _sign_ok(amount: Decimal, sign: str) -> bool:
 
 
 def _amount_for_aggregation(amount: Decimal) -> Decimal:
-    return abs(amount)
+    # Legs aggregate signed amounts as posted: inflows positive, outflows
+    # negative. Only the final reported actual is made positive, never the
+    # intermediate terms — abs() here would turn every difference into a total.
+    return amount
 
 
 RELATED_PARTY_MARKERS = (
@@ -369,7 +374,8 @@ def _row_matches_spec(
         return False
 
     if (
-        _requires_unrestricted_subsidiary_capex(covenant_context)
+        leg == "numerator"
+        and _requires_unrestricted_subsidiary_capex(covenant_context)
         and category == "capex"
     ):
         if parties is None or not _counterparty_matches(
@@ -416,24 +422,33 @@ def _sum_rows(rows: list[dict[str, Any]]) -> Decimal:
 def _ebitda_addback_adjustments(
     adjustments: dict[str, Any],
     scenario_id: str,
-) -> list[tuple[str, Decimal]]:
-    """EBITDA add-backs target the numerator leg only."""
-    items: list[tuple[str, Decimal]] = []
+) -> list[tuple[str, Decimal, list[dict[str, Any]]]]:
+    """EBITDA add-back tables as (adjustment id, above-floor total, all rows).
+
+    Every row is a one-off expense: all of them are subtracted inside opex
+    first, and only rows at or above the materiality floor are added back.
+    """
+    items: list[tuple[str, Decimal, list[dict[str, Any]]]] = []
     for adj_id, adj in adjustments.items():
         if adj.get("scenario_id") != scenario_id or adj.get("kind") != "EBITDA_ADDBACK":
             continue
-        total = ZERO
-        for row in adj.get("rows") or []:
-            if row.get("above_floor"):
-                total += _d(row.get("amount"))
-        if total != ZERO:
-            items.append((adj_id, total))
+        rows = [row for row in (adj.get("rows") or []) if _d(row.get("amount")) != ZERO]
+        if not rows:
+            continue
+        above_floor = sum(
+            (_d(row.get("amount")) for row in rows if row.get("above_floor")),
+            ZERO,
+        )
+        items.append((adj_id, above_floor, rows))
     return items
 
 
 def _addback_total(adjustments: dict[str, Any], scenario_id: str) -> Decimal:
     return sum(
-        (amount for _, amount in _ebitda_addback_adjustments(adjustments, scenario_id)),
+        (
+            above_floor
+            for _, above_floor, _rows in _ebitda_addback_adjustments(adjustments, scenario_id)
+        ),
         ZERO,
     )
 
@@ -505,21 +520,35 @@ def _compute_ebitda(
     }
     revenue = _sum_rows(_filter_rows(ledger, revenue_spec, period=period, parties=None))
     opex = _sum_rows(_filter_rows(ledger, opex_spec, period=period, parties=None))
-    return revenue - opex + addbacks
+    return revenue + opex + addbacks
 
 
 def _metric_notes(notes: str) -> str:
     return " ".join(str(notes).split()).casefold()
 
 
-def _notes_define_ebitda_leg(notes: str, spec: dict[str, Any]) -> bool:
-    text = notes.casefold()
-    if "ebitda" not in text:
+EBITDA_COMPONENT_SLUGS = frozenset({"revenue", "opex"} | set(OPEX_SLUGS))
+
+
+def _is_ebitda_leg(spec: dict[str, Any], notes: str, *, leg: str) -> bool:
+    """True when the leg itself is defined as EBITDA (revenue minus opex).
+
+    The leg's own include_keywords are the primary signal, so an EBITDA
+    denominator is derived while a capex or financing numerator sitting next
+    to EBITDA notes is left alone. Numerator legs whose keywords were remapped
+    to plain revenue/opex slugs still take the derived path.
+    """
+    if "ebitda" not in notes:
         return False
     include_keywords = {str(keyword).casefold() for keyword in spec.get("include_keywords") or []}
-    if "capex" in include_keywords:
+    keyword_text = " ".join(sorted(include_keywords))
+    if "capex" in keyword_text or "капитал" in keyword_text:
         return False
-    return True
+    if "ebitda" in keyword_text:
+        return True
+    if leg != "numerator":
+        return False
+    return not include_keywords or include_keywords <= EBITDA_COMPONENT_SLUGS
 
 
 def _special_metric(
@@ -547,10 +576,15 @@ def _special_metric(
             "exclude_keywords": [],
             "apply_reclass": True,
         }
-        return max(
-            _sum_rows(_filter_rows(ledger, payroll_spec, period=period, parties=parties)),
-            _sum_rows(_filter_rows(ledger, util_spec, period=period, parties=parties)),
+        payroll_total = _sum_rows(
+            _filter_rows(ledger, payroll_spec, period=period, parties=parties)
         )
+        util_total = _sum_rows(
+            _filter_rows(ledger, util_spec, period=period, parties=parties)
+        )
+        # Overhead lines are outflows (negative as posted); the ceiling is the
+        # largest line by magnitude.
+        return max(abs(payroll_total), abs(util_total))
 
     if slot == "6.2" and "за вычетом наибольшей" in notes:
         revenue = _sum_rows(
@@ -589,7 +623,9 @@ def _special_metric(
                 parties=parties,
             )
         )
-        return revenue - max(payroll, tax)
+        # payroll/tax are negative as posted; min() picks the larger expense,
+        # so revenue + min(...) subtracts the largest of the two lines.
+        return revenue + min(payroll, tax)
 
     if metric["kind"] == "RATIO":
         pass  # ratio legs handle EBITDA below
@@ -639,7 +675,7 @@ def _ebitda_breakdown(
     *,
     period: tuple[date, date],
     apply_reclass: bool,
-    addbacks: Decimal,
+    addback_items: list[tuple[str, Decimal, list[dict[str, Any]]]],
     label: str,
 ) -> LegBreakdown:
     revenue_spec = {
@@ -656,16 +692,31 @@ def _ebitda_breakdown(
     opex_rows = _filter_rows(ledger, opex_spec, period=period, parties=None)
     revenue = _sum_rows(revenue_rows)
     opex = _sum_rows(opex_rows)
-    value = revenue - opex + addbacks
+    value = revenue + opex
     terms: list[tuple[str, Decimal]] = [
         ("revenue", revenue),
-        ("opex", -opex),
+        ("opex", opex),
     ]
-    if addbacks != ZERO:
-        terms.append(("addbacks", addbacks))
-    expression = label
-    if addbacks != ZERO:
-        expression = f"{label} = revenue - opex + addbacks"
+    opex_txn_ids = {str(row.get("txn_id")) for row in opex_rows if row.get("txn_id")}
+    for adj_id, above_floor, addback_rows in addback_items:
+        # One-off rows are expenses: subtract every row that the opex leg has
+        # not already captured, then add back only the above-floor ones.
+        unsubtracted = sum(
+            (
+                _d(row.get("amount"))
+                for row in addback_rows
+                if str(row.get("matched_txn") or "") not in opex_txn_ids
+            ),
+            ZERO,
+        )
+        if unsubtracted != ZERO:
+            value -= unsubtracted
+            terms.append((f"one_off_expense:{adj_id}", -unsubtracted))
+        if above_floor != ZERO:
+            value += above_floor
+            terms.append((f"addback:{adj_id}", above_floor))
+    if addback_items:
+        expression = f"{label} = revenue - (opex + one-offs) + addbacks"
     else:
         expression = f"{label} = revenue - opex"
     return LegBreakdown(
@@ -700,11 +751,11 @@ def _leg_breakdown(
     flags: list[str] = []
     notes = _metric_notes(metric.get("notes", ""))
 
-    if leg == "numerator" and _notes_define_ebitda_leg(notes, spec):
-        addback_items: list[tuple[str, Decimal]] = []
-        if leg == "numerator" and "скорректированная" in notes:
+    if _is_ebitda_leg(spec, notes, leg=leg):
+        addback_items: list[tuple[str, Decimal, list[dict[str, Any]]]] = []
+        if "скорректированная" in notes:
             addback_items = _ebitda_addback_adjustments(adjustments, scenario_id)
-            for adj_id, _ in addback_items:
+            for adj_id, _, _rows in addback_items:
                 _record_adjustment_application(
                     metadata,
                     adjustment_id=adj_id,
@@ -712,25 +763,15 @@ def _leg_breakdown(
                     scenario_id=scenario_id,
                     slot=slot,
                 )
-        addbacks = sum(
-            (amount for _, amount in addback_items),
-            ZERO,
-        )
         borrower_ledger = _rows_for_scope(full_ledger, scenario_id=scenario_id, scope="BORROWER")
-        label = "adjusted EBITDA" if addbacks != ZERO else "EBITDA"
+        label = "adjusted EBITDA" if addback_items else "EBITDA"
         breakdown = _ebitda_breakdown(
             borrower_ledger,
             period=period,
             apply_reclass=bool(spec.get("apply_reclass", True)),
-            addbacks=addbacks,
+            addback_items=addback_items,
             label=label,
         )
-        if addback_items:
-            breakdown.terms = [
-                term for term in breakdown.terms if term[0] != "addbacks"
-            ]
-            for adj_id, amount in addback_items:
-                breakdown.terms.append((f"addback:{adj_id}", amount))
         breakdown.flags.extend(flags)
         _record_leg_metadata(metadata, leg=leg, breakdown=breakdown)
         _assert_leg_subtotal(breakdown, scenario_id=scenario_id, slot=slot, leg=leg)
@@ -881,6 +922,33 @@ def describe_leg_breakdown(
     )
 
 
+def _leg_row_ids(breakdown: LegBreakdown) -> set[str]:
+    ids: set[str] = set()
+    for row in breakdown.rows:
+        row_id = row.get("txn_id") or row.get("adjustment_ref")
+        if row_id is not None:
+            ids.add(str(row_id))
+    return ids
+
+
+def _identical_leg_rows(
+    numerator: LegBreakdown,
+    denominator: LegBreakdown,
+) -> set[str]:
+    """Row ids when a ratio's two legs resolve to an identical row set.
+
+    In a ratio expressing a share, the denominator is the whole and the
+    numerator a subset of it; identical selections are an extraction failure.
+    Returns an empty set when the legs are distinct.
+    """
+    numerator_ids = _leg_row_ids(numerator)
+    if not numerator_ids:
+        return set()
+    if numerator_ids == _leg_row_ids(denominator):
+        return numerator_ids
+    return set()
+
+
 def compute_covenant_metric(
     covenant: dict[str, Any],
     ledger: list[dict[str, Any]],
@@ -890,7 +958,11 @@ def compute_covenant_metric(
     work_dir: Path | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> Decimal:
-    """Compute the covenant metric at full Decimal precision."""
+    """Compute the covenant metric at full Decimal precision.
+
+    Legs aggregate signed amounts as posted; only the final reported actual
+    returned here is made positive.
+    """
     adjustments = adjustments or {}
     scenario_id = covenant["scenario_id"]
     slot = covenant["slot"]
@@ -914,23 +986,25 @@ def compute_covenant_metric(
 
     metric = covenant["metric"]
     if metric["kind"] == "SUM":
-        return _leg_value(
-            scenario_ledger,
-            metric["numerator"],
-            period=period,
-            parties=parties,
-            adjustments=adjustments,
-            scenario_id=scenario_id,
-            slot=slot,
-            leg="numerator",
-            metric=metric,
-            full_ledger=ledger,
-            work_dir=work_dir,
-            metadata=metadata,
-            covenant_context=covenant_context,
+        return abs(
+            _leg_value(
+                scenario_ledger,
+                metric["numerator"],
+                period=period,
+                parties=parties,
+                adjustments=adjustments,
+                scenario_id=scenario_id,
+                slot=slot,
+                leg="numerator",
+                metric=metric,
+                full_ledger=ledger,
+                work_dir=work_dir,
+                metadata=metadata,
+                covenant_context=covenant_context,
+            )
         )
 
-    numerator = _leg_value(
+    numerator_breakdown = _leg_breakdown(
         scenario_ledger,
         metric["numerator"],
         period=period,
@@ -945,7 +1019,7 @@ def compute_covenant_metric(
         metadata=metadata,
         covenant_context=covenant_context,
     )
-    denominator = _leg_value(
+    denominator_breakdown = _leg_breakdown(
         scenario_ledger,
         metric.get("denominator"),
         period=period,
@@ -960,9 +1034,19 @@ def compute_covenant_metric(
         metadata=metadata,
         covenant_context=covenant_context,
     )
-    if denominator == ZERO:
+    identical_rows = _identical_leg_rows(numerator_breakdown, denominator_breakdown)
+    if identical_rows:
+        # Extraction failure: flag the cell for degradation and move on —
+        # one bad covenant must never cost the whole run.
+        if metadata is not None:
+            flags = metadata.setdefault("flags", [])
+            if IDENTICAL_LEGS not in flags:
+                flags.append(IDENTICAL_LEGS)
+            metadata["identical_leg_rows"] = sorted(identical_rows)
         return ZERO
-    return numerator / denominator
+    if denominator_breakdown.value == ZERO:
+        return ZERO
+    return abs(numerator_breakdown.value / denominator_breakdown.value)
 
 
 def _explain_row_match(

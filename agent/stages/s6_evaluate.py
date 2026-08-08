@@ -16,6 +16,7 @@ from agent.metrics.engine import (
     compare_values,
     compute_covenant_metric,
     EMPTY_LEG,
+    IDENTICAL_LEGS,
     _requires_related_party_filter,
 )
 from agent.parsing.numbers import round_half_up
@@ -102,6 +103,13 @@ def _evaluate_cell(
             computed = False
             status = SLOT_STATUS_PRIOR.get(slot, "COMPLIANT")
             strategy = "empty_leg_slot_prior"
+            actual = Decimal("0")
+        elif IDENTICAL_LEGS in flags:
+            # Both legs selected the same rows: extraction failure. Degrade
+            # this cell through the slot prior and keep evaluating the rest.
+            computed = False
+            status = SLOT_STATUS_PRIOR.get(slot, "COMPLIANT")
+            strategy = "identical_legs_slot_prior"
             actual = Decimal("0")
         elif metric_metadata.get("strategy"):
             strategy = str(metric_metadata["strategy"])
@@ -213,12 +221,13 @@ def run(*, work_dir: Path) -> StageResult:
 
     review = [
         {
-            "kind": "ABSENT_RELATEDNESS_THRESHOLD",
+            "kind": kind,
             "scenario_id": finding["scenario_id"],
             "slot": finding["slot"],
         }
         for finding in findings
-        if "ABSENT_RELATEDNESS_THRESHOLD" in (finding.get("flags") or [])
+        for kind in ("ABSENT_RELATEDNESS_THRESHOLD", IDENTICAL_LEGS)
+        if kind in (finding.get("flags") or [])
     ]
     payload = {
         "findings": findings,
@@ -228,6 +237,9 @@ def run(*, work_dir: Path) -> StageResult:
             "breach_count": sum(1 for f in findings if f["status"] == "BREACH"),
             "empty_leg_count": sum(
                 1 for finding in findings if "EMPTY_LEG" in (finding.get("flags") or [])
+            ),
+            "identical_leg_count": sum(
+                1 for finding in findings if IDENTICAL_LEGS in (finding.get("flags") or [])
             ),
             "review_count": len(review),
         },

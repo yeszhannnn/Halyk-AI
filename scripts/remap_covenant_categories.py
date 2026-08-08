@@ -36,8 +36,8 @@ KEYWORD_TO_CATEGORIES: dict[str, list[str]] = {
     "операционных и капитальных затрат": ["opex", "capex"],
     "операционных капитальных затрат": ["opex", "capex"],
     "сумме операционных и капитальных затрат": ["opex", "capex"],
-    "ebitda": ["revenue"],
-    "скорректированная ebitda": ["revenue"],
+    "ebitda": ["revenue", "opex"],
+    "скорректированная ebitda": ["revenue", "opex"],
     "капитальные затраты": ["capex"],
     "капитальных затрат": ["capex"],
     "совокупных капитальных затрат": ["capex"],
@@ -96,7 +96,7 @@ def remap_covenant(covenant: dict) -> None:
         _remap_category(metric.get(leg))
     if "ebitda" in notes.casefold() and metric.get("numerator") is not None:
         if not metric["numerator"].get("include_keywords"):
-            metric["numerator"]["include_keywords"] = ["revenue"]
+            metric["numerator"]["include_keywords"] = ["revenue", "opex"]
     springing = covenant.get("springing")
     if isinstance(springing, dict):
         spring_metric = springing.get("metric") or {}

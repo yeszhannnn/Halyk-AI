@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from agent.config import DEADLINE, LLM_PROVIDER, MODEL_ID, TEMPERATURE
+from agent.llm.client import RUN_COUNTER
 from agent.degrade import apply_degradation_ladder
 from agent.preflight import print_preflight_report, run_preflight
 from agent.stages import StageResult
@@ -67,6 +68,7 @@ def _write_manifest(
         "llm_provider": LLM_PROVIDER,
         "model_id": MODEL_ID,
         "temperature": TEMPERATURE,
+        "llm": RUN_COUNTER.to_dict(),
         "input_dir": str(input_dir),
         "output_path": str(output_path),
         "deadline": DEADLINE.isoformat(),

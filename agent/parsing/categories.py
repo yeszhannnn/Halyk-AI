@@ -53,10 +53,11 @@ REVENUE_MARKERS = (
     "refrigerated distribution sales",
 )
 
+# Financing means funding drawdowns only. Incentives, rebates, credits,
+# refunds and recoveries are never financing, regardless of counterparty.
 FINANCING_MARKERS = (
     "drawdown",
     "facility drawdown",
-    "lease incentive received",
 )
 
 
@@ -117,6 +118,11 @@ def infer_category(description: str) -> str:
         return "utilities"
     if " rent" in text or text.startswith("rent ") or " lease" in text or "lease " in text:
         return "rent"
-    if "servicing and operating costs" in text or "operating and maintenance" in text:
+    if (
+        "servicing and operating costs" in text
+        or "operating and maintenance" in text
+        or "servicing contract" in text
+        or "servicing agreement" in text
+    ):
         return "opex"
     return "other"

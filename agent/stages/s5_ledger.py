@@ -18,7 +18,6 @@ ACTIONABLE_KINDS = (
     "EXCLUDE",
     "CUTOFF",
     "RECLASS",
-    "FX",
     "OFF_LEDGER",
 )
 
@@ -58,21 +57,9 @@ def _account_to_scenario(bind: dict[str, Any]) -> dict[str, str]:
     return reverse
 
 
-def _apply_adjustments(
-    rows: list[dict[str, Any]],
-    adjustments: dict[str, Any],
-    *,
-    scenario_accounts: dict[str, list[str]],
-    conflicts: list[dict[str, Any]],
-) -> None:
-    by_scenario: dict[str, list[dict[str, Any]]] = {}
-    by_txn: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        by_scenario.setdefault(row["scenario_id"], []).append(row)
-        if row.get("txn_id"):
-            by_txn[str(row["txn_id"])] = row
-
-    fx_rates: dict[str, Decimal] = {}
+def _fx_rates(adjustments: dict[str, Any]) -> dict[str, tuple[Decimal, str]]:
+    """Disclosed FX rate per scenario, sourced from FX adjustments."""
+    rates: dict[str, tuple[Decimal, str]] = {}
     for adj_id, adj in adjustments.items():
         if adj.get("kind") != "FX":
             continue
@@ -83,7 +70,57 @@ def _apply_adjustments(
             if source_amt and settlement and source_amt != 0:
                 rate = settlement / source_amt
         if rate is not None:
-            fx_rates[adj["scenario_id"]] = rate
+            rates[str(adj["scenario_id"])] = (rate, adj_id)
+    return rates
+
+
+def _normalize_fx(
+    rows: list[dict[str, Any]],
+    fx_rates: dict[str, tuple[Decimal, str]],
+    conflicts: list[dict[str, Any]],
+) -> None:
+    """Convert every foreign-currency row to USD at the scenario's disclosed rate.
+
+    Runs once during ledger normalisation so every downstream leg sees
+    converted amounts with the posted sign preserved, rather than converting
+    per covenant.
+    """
+    for row in rows:
+        currency = str(row.get("currency") or "USD")
+        if currency == "USD":
+            continue
+        entry = fx_rates.get(str(row.get("scenario_id")))
+        if entry is None:
+            conflicts.append(
+                {
+                    "kind": "FX_RATE_MISSING",
+                    "scenario_id": row.get("scenario_id"),
+                    "txn_id": row.get("txn_id"),
+                    "currency": currency,
+                },
+            )
+            continue
+        rate, adj_id = entry
+        amount = _decimal_or_none(row.get("amount_usd"))
+        if amount is None:
+            continue
+        row["amount_usd"] = str(amount * rate)
+        row["currency"] = "USD"
+        if not row.get("adjustment_ref"):
+            row["adjustment_ref"] = adj_id
+
+
+def _apply_adjustments(
+    rows: list[dict[str, Any]],
+    adjustments: dict[str, Any],
+    *,
+    scenario_accounts: dict[str, list[str]],
+    conflicts: list[dict[str, Any]],
+) -> None:
+    by_txn: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if row.get("txn_id"):
+            by_txn[str(row["txn_id"])] = row
 
     ordered = sorted(
         adjustments.items(),
@@ -94,8 +131,6 @@ def _apply_adjustments(
             if item[1].get("kind") in {"EXCLUDE", "CUTOFF"}
             else 2
             if item[1].get("kind") == "RECLASS"
-            else 3
-            if item[1].get("kind") == "FX"
             else 4
             if item[1].get("kind") == "OFF_LEDGER"
             else 9
@@ -160,19 +195,6 @@ def _apply_adjustments(
             if adj.get("to_category"):
                 row["category"] = adj["to_category"]
             row["adjustment_ref"] = adj_id
-            continue
-
-        if kind == "FX":
-            rate = fx_rates.get(scenario_id)
-            if rate is None:
-                continue
-            for row in by_scenario.get(scenario_id, []):
-                if row.get("currency") == "EUR" and not row.get("excluded"):
-                    amount = _decimal_or_none(row.get("amount_usd"))
-                    if amount is not None:
-                        row["amount_usd"] = str(abs(amount) * rate if amount < 0 else amount * rate)
-                        row["currency"] = "USD"
-                        row["adjustment_ref"] = adj_id
             continue
 
         if kind == "OFF_LEDGER":
@@ -317,6 +339,7 @@ def run(*, work_dir: Path) -> StageResult:
         )
 
     _apply_adjustments(rows, adjustments, scenario_accounts=scenario_accounts, conflicts=conflicts)
+    _normalize_fx(rows, _fx_rates(adjustments), conflicts)
     _resolve_null_amounts(rows, adjustments, conflicts)
     _assert_no_null_amounts(rows)
 

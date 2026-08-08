@@ -29,6 +29,7 @@ from agent.config import (
     LLM_PROVIDER,
     MAX_CONCURRENT,
     MODEL_ID,
+    OPENAI_MODEL_ID,
     OPENAI_SEED,
     TEMPERATURE,
 )
@@ -56,6 +57,7 @@ _RETRY_BODY_HINT_MILLISECONDS = re.compile(
 MODEL_PRICING_PER_MILLION: dict[str, tuple[Decimal, Decimal]] = {
     "gpt-4o": (Decimal("2.50"), Decimal("10.00")),
     "gpt-4o-mini": (Decimal("0.15"), Decimal("0.60")),
+    OPENAI_MODEL_ID: (Decimal("0.20"), Decimal("1.20")),
     "claude-haiku-4-5-20251001": (Decimal("1.00"), Decimal("5.00")),
 }
 
@@ -95,6 +97,7 @@ class LLMTransportExhaustedError(RuntimeError):
 class RunCounter:
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    reasoning_tokens: int = 0
     total_tokens: int = 0
     cost_usd: Decimal = field(default_factory=lambda: Decimal("0"))
     cache_hits: int = 0
@@ -102,7 +105,7 @@ class RunCounter:
     api_calls: int = 0
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        stats: dict[str, Any] = {
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "total_tokens": self.total_tokens,
@@ -111,6 +114,9 @@ class RunCounter:
             "cache_misses": self.cache_misses,
             "api_calls": self.api_calls,
         }
+        if self.reasoning_tokens:
+            stats["reasoning_tokens"] = self.reasoning_tokens
+        return stats
 
 
 RUN_COUNTER = RunCounter()
@@ -149,9 +155,11 @@ def _read_fixture(
         raise ReplayMissError(f"no replay fixture for prompt hash {cache_key}")
     cached = json.loads(path.read_text(encoding="utf-8"))
     counter.cache_hits += 1
-    counter.prompt_tokens += int(cached.get("usage", {}).get("prompt_tokens", 0))
-    counter.completion_tokens += int(cached.get("usage", {}).get("completion_tokens", 0))
-    counter.total_tokens += int(cached.get("usage", {}).get("total_tokens", 0))
+    usage = cached.get("usage", {})
+    counter.prompt_tokens += int(usage.get("prompt_tokens", 0))
+    counter.completion_tokens += int(usage.get("completion_tokens", 0))
+    counter.reasoning_tokens += int(usage.get("reasoning_tokens", 0))
+    counter.total_tokens += int(usage.get("total_tokens", 0))
     counter.cost_usd += Decimal(str(cached.get("cost_usd", "0")))
     return response_model.model_validate(cached["response"])
 
@@ -268,15 +276,29 @@ def _read_token_field(usage: Any, *field_names: str) -> int | None:
     return None
 
 
+def _read_reasoning_tokens(usage: Any) -> int:
+    direct = _read_token_field(usage, "reasoning_tokens")
+    if direct is not None:
+        return direct
+    details = getattr(usage, "completion_tokens_details", None)
+    if details is not None:
+        return _read_token_field(details, "reasoning_tokens") or 0
+    return 0
+
+
 def _usage_fields(usage: Any) -> dict[str, int]:
     prompt_tokens = _read_token_field(usage, "prompt_tokens", "input_tokens") or 0
     completion_tokens = _read_token_field(usage, "completion_tokens", "output_tokens") or 0
+    reasoning_tokens = _read_reasoning_tokens(usage)
     total_tokens = _read_token_field(usage, "total_tokens") or (prompt_tokens + completion_tokens)
-    return {
+    fields = {
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "total_tokens": total_tokens,
     }
+    if reasoning_tokens:
+        fields["reasoning_tokens"] = reasoning_tokens
+    return fields
 
 
 def _cache_path(cache_key: str) -> Path:
@@ -289,9 +311,11 @@ def _read_cache(cache_key: str, response_model: type[T], counter: RunCounter) ->
         return None
     cached = json.loads(path.read_text(encoding="utf-8"))
     counter.cache_hits += 1
-    counter.prompt_tokens += int(cached.get("usage", {}).get("prompt_tokens", 0))
-    counter.completion_tokens += int(cached.get("usage", {}).get("completion_tokens", 0))
-    counter.total_tokens += int(cached.get("usage", {}).get("total_tokens", 0))
+    usage = cached.get("usage", {})
+    counter.prompt_tokens += int(usage.get("prompt_tokens", 0))
+    counter.completion_tokens += int(usage.get("completion_tokens", 0))
+    counter.reasoning_tokens += int(usage.get("reasoning_tokens", 0))
+    counter.total_tokens += int(usage.get("total_tokens", 0))
     counter.cost_usd += Decimal(str(cached.get("cost_usd", "0")))
     return response_model.model_validate(cached["response"])
 
@@ -319,11 +343,13 @@ def _record_usage(model: str, usage: Any, counter: RunCounter) -> Decimal:
     usage_fields = _usage_fields(usage)
     prompt_tokens = usage_fields["prompt_tokens"]
     completion_tokens = usage_fields["completion_tokens"]
+    reasoning_tokens = usage_fields.get("reasoning_tokens", 0)
     total_tokens = usage_fields["total_tokens"]
     cost = _estimate_cost(model, prompt_tokens, completion_tokens)
 
     counter.prompt_tokens += prompt_tokens
     counter.completion_tokens += completion_tokens
+    counter.reasoning_tokens += reasoning_tokens
     counter.total_tokens += total_tokens
     counter.cost_usd += cost
     counter.api_calls += 1

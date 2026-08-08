@@ -89,6 +89,11 @@ Rules:
 - threshold_unit is USD for dollar amounts, RATIO for multipliers like 0.04x or 1.20x.
 - metric.scope is BORROWER unless the clause explicitly uses group/consolidated/Группы scope.
 - For metric.kind RATIO: provide numerator and denominator category legs.
+- In a ratio expressing a share, the denominator is the whole and the numerator a
+  subset of it: the two legs must never select the same category with the same
+  filter (e.g. assets transferred to unrestricted subsidiaries over the borrower's
+  total capital assets — the numerator filters the capex subset, the denominator
+  selects all capex).
 - For metric.kind SUM or COUNT: provide a single category leg (not numerator/denominator).
 - Each category leg's include_keywords must contain one or more slugs from the ledger
   category list provided in the prompt. Never invent phrases or translate contract language.

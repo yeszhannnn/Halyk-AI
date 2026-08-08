@@ -21,8 +21,9 @@ TPM_LIMIT = int(os.getenv("TPM_LIMIT", "150000"))
 BUDGET_USD = Decimal(os.getenv("BUDGET_USD", "50.00"))
 
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai").strip().lower()
+OPENAI_MODEL_ID = "gpt-4o-mini"
 _PROVIDER_MODELS = {
-    "openai": "gpt-4o-mini",
+    "openai": OPENAI_MODEL_ID,
     "anthropic": "claude-haiku-4-5-20251001",
 }
 if LLM_PROVIDER not in _PROVIDER_MODELS:
