@@ -19,6 +19,7 @@ from agent.parsing.categories import (
 from agent.stages.s4b_parties import normalize_counterparty
 
 ZERO = Decimal("0")
+OPEX_KEYWORDS = frozenset({"opex"} | set(OPEX_SLUGS))
 EMPTY_CATEGORY_SPEC = "EMPTY_CATEGORY_SPEC"
 EMPTY_LEG = "EMPTY_LEG"
 ZERO_DENOMINATOR = "ZERO_DENOMINATOR"
@@ -192,6 +193,7 @@ class LegBreakdown:
     terms: list[tuple[str, Decimal]] = field(default_factory=list)
     flags: list[str] = field(default_factory=list)
     categories: list[str] = field(default_factory=list)
+    shape: str | None = None
 
     @property
     def row_count(self) -> int:
@@ -627,6 +629,13 @@ def _is_ebitda_leg(spec: dict[str, Any], notes: str, *, leg: str) -> bool:
     # EBITDA margin numerators can be mis-tagged with revenue slugs only.
     if leg == "numerator" and include_keywords <= frozenset({"revenue"}):
         return True
+    # Burden/coverage denominators mis-tagged as bare opex when notes name EBITDA.
+    if (
+        leg == "denominator"
+        and include_keywords
+        and include_keywords <= OPEX_KEYWORDS
+    ):
+        return True
     return False
 
 
@@ -732,6 +741,7 @@ def _record_leg_metadata(
     legs = metadata.setdefault("legs", {})
     legs[leg] = {
         "kind": breakdown.kind,
+        "shape": breakdown.shape or breakdown.kind,
         "value": str(breakdown.value),
         "row_count": breakdown.row_count,
         "category_count": breakdown.category_count,
@@ -794,6 +804,7 @@ def _ebitda_breakdown(
         expression = f"{label} = revenue - (opex + one-offs) + addbacks"
     else:
         expression = f"{label} = revenue - opex"
+    shape = "derived_adjusted_ebitda" if addback_items else "derived_ebitda"
     return LegBreakdown(
         kind="derived",
         value=value,
@@ -801,6 +812,7 @@ def _ebitda_breakdown(
         terms=terms,
         flags=flags,
         categories=sorted({row.get("category", "other") for row in revenue_rows + opex_rows}),
+        shape=shape,
     )
 
 
@@ -926,6 +938,7 @@ def _leg_breakdown(
         rows=rows,
         categories=categories,
         flags=flags,
+        shape="category_rows" if rows else None,
     )
     _record_leg_metadata(metadata, leg=leg, breakdown=breakdown)
     _assert_leg_subtotal(breakdown, scenario_id=scenario_id, slot=slot, leg=leg)

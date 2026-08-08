@@ -12,6 +12,7 @@ from typing import Any
 from agent.evidence.quotes import verify_extracted_fields, verify_quote
 from agent.llm import client as llm_client
 from agent.llm.client import LLMClient, LLMTransportExhaustedError, LLMValidationError
+from agent.llm.extraction_vote import EXTRACTION_UNSTABLE
 from agent.llm.schemas.covenants import (
     CategorySpecExtract,
     CovenantExtract,
@@ -25,7 +26,7 @@ from agent.llm.schemas.covenants import (
     _text_refers_to_related_parties,
 )
 from agent.models import CategorySpec, Covenant, MetricSpec, Provenance, SpringingCondition
-from agent.parsing.categories import derive_leg_sign
+from agent.parsing.categories import OPEX_SLUGS, derive_leg_sign
 from agent.parsing.numbers import (
     ABSENT_SENTINEL_MESSAGE,
     capture_absent_values,
@@ -59,6 +60,8 @@ THRESHOLD_USD_MIN = Decimal("1000")
 ZERO_THRESHOLD_MARKERS = ("0", "0.0", "0,0", "ноль", "zero")
 MAX_INVALID_COVENANT_FRACTION = Decimal("0.2")
 MAX_EXTRACTION_ATTEMPTS = 3
+
+OPEX_KEYWORDS = frozenset({"opex"} | set(OPEX_SLUGS))
 
 
 class CovenantExtractionError(RuntimeError):
@@ -393,6 +396,24 @@ def _springing_quote_checks(
     return checks
 
 
+def _prefer_ebitda_denominator_shape(
+    metric: MetricSpecExtract,
+    notes: str,
+) -> str | None:
+    """Upgrade a bare opex denominator to derived EBITDA when notes name EBITDA."""
+    if "ebitda" not in notes.casefold():
+        return None
+    if metric.kind != MetricKind.RATIO or metric.denominator is None:
+        return None
+    keywords = frozenset(str(keyword).casefold() for keyword in metric.denominator.include_keywords)
+    if not keywords or keywords == frozenset({"revenue", "opex"}):
+        return None
+    if keywords <= OPEX_KEYWORDS:
+        metric.denominator.include_keywords = ["revenue", "opex"]
+        return "derived_ebitda"
+    return None
+
+
 def _category_from_extract(spec: CategorySpecExtract | Any) -> CategorySpec:
     categories = [str(keyword) for keyword in spec.include_keywords]
     return CategorySpec(
@@ -464,7 +485,8 @@ def _covenant_from_extract(
     doc_id: str,
     pages: list[str],
     fallback_page: int,
-) -> Covenant:
+) -> tuple[Covenant, str | None]:
+    denominator_shape = _prefer_ebitda_denominator_shape(extracted.metric, extracted.notes)
     springing = (
         _springing_from_extract(
             extracted.springing,
@@ -475,7 +497,7 @@ def _covenant_from_extract(
         if extracted.springing is not None
         else None
     )
-    return Covenant(
+    covenant = Covenant(
         scenario_id=scenario_id,
         slot=f"6.{slot}",
         title=extracted.title,
@@ -492,6 +514,7 @@ def _covenant_from_extract(
             fallback_page=fallback_page,
         ),
     )
+    return covenant, denominator_shape
 
 
 def _decimal_to_str(value: Decimal) -> str:
@@ -520,7 +543,11 @@ def _serialize_category(category: CategorySpec) -> dict[str, Any]:
     }
 
 
-def _serialize_metric(metric: MetricSpec) -> dict[str, Any]:
+def _serialize_metric(
+    metric: MetricSpec,
+    *,
+    denominator_shape: str | None = None,
+) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "kind": metric.kind,
         "numerator": _serialize_category(metric.numerator),
@@ -531,6 +558,8 @@ def _serialize_metric(metric: MetricSpec) -> dict[str, Any]:
         payload["denominator"] = _serialize_category(metric.denominator)
     else:
         payload["denominator"] = None
+    if denominator_shape:
+        payload["denominator_shape"] = denominator_shape
     return payload
 
 
@@ -545,7 +574,12 @@ def _serialize_springing(springing: SpringingCondition | None) -> dict[str, Any]
     }
 
 
-def _serialize_covenant(covenant: Covenant, verification: dict[str, bool]) -> dict[str, Any]:
+def _serialize_covenant(
+    covenant: Covenant,
+    verification: dict[str, bool],
+    *,
+    denominator_shape: str | None = None,
+) -> dict[str, Any]:
     period_start, period_end = covenant.period
     return {
         "scenario_id": covenant.scenario_id,
@@ -554,7 +588,10 @@ def _serialize_covenant(covenant: Covenant, verification: dict[str, bool]) -> di
         "direction": covenant.direction,
         "threshold": _decimal_to_str(covenant.threshold),
         "threshold_unit": covenant.threshold_unit,
-        "metric": _serialize_metric(covenant.metric),
+        "metric": _serialize_metric(
+            covenant.metric,
+            denominator_shape=denominator_shape,
+        ),
         "period": [period_start.isoformat(), period_end.isoformat()],
         "springing": _serialize_springing(covenant.springing),
         "source": _serialize_provenance(covenant.source),
@@ -835,7 +872,8 @@ async def _extract_covenant_item(
     validation_feedback: str | None = None,
     threshold_candidates: list[tuple[Decimal, str]] | None = None,
     expect_springing: bool | None = None,
-) -> tuple[CovenantExtract, dict[str, bool]]:
+) -> tuple[CovenantExtract, dict[str, bool], list[dict[str, Any]]]:
+    unstable_fields: list[dict[str, Any]] = []
     candidates = threshold_candidates or _extract_threshold_candidates(item_text)
     feedback = validation_feedback
     active_candidates = threshold_candidates
@@ -885,7 +923,7 @@ async def _extract_covenant_item(
             {"role": "user", "content": user_content},
         ]
         try:
-            raw = await client.complete_verified(
+            raw, pass_unstable = await client.complete_verified_voted(
                 response_model=response_model,
                 messages=messages,
                 quote_checks=lambda result: _quote_checks(
@@ -896,8 +934,10 @@ async def _extract_covenant_item(
                     verification_text,
                 ),
                 validation_context=validation_context,
+                context={"scenario_id": scenario_id, "slot": f"6.{slot}"},
                 **({"use_cache": False} if active_candidates else {}),
             )
+            unstable_fields.extend(pass_unstable)
             extracted = _to_covenant_extract(
                 raw,
                 springing=raw.springing if expect_springing else None,
@@ -978,7 +1018,7 @@ async def _extract_covenant_item(
     payload = extracted.model_dump(mode="python")
     verify_extracted_fields(payload, fields=_quote_checks(extracted, verification_text))
     verification = _collect_verification_flags(payload)
-    return extracted, verification
+    return extracted, verification, unstable_fields
 
 
 async def _process_scenario(
@@ -989,7 +1029,7 @@ async def _process_scenario(
     pages: list[str],
     ledger_categories: list[str],
     conflicts: list[dict[str, Any]],
-) -> list[tuple[Covenant, dict[str, bool], list[dict[str, Any]]]]:
+) -> list[tuple[Covenant, dict[str, bool], list[dict[str, Any]], str | None]]:
     section = _extract_article_6(pages)
     items = _split_punkts(section)
     results: list[tuple[Covenant, dict[str, bool], list[dict[str, Any]]]] = []
@@ -998,7 +1038,7 @@ async def _process_scenario(
         item_text = items[slot]
         fallback_page, _, _ = _page_span_for_text(pages, item_text[:120])
         with capture_absent_values() as absent_fields:
-            extracted, verification = await _extract_covenant_item(
+            extracted, verification, unstable_fields = await _extract_covenant_item(
                 client,
                 scenario_id=scenario_id,
                 slot=slot,
@@ -1006,6 +1046,7 @@ async def _process_scenario(
                 verification_text=item_text,
                 ledger_categories=ledger_categories,
             )
+        conflicts.extend(unstable_fields)
         for field_name in absent_fields:
             conflicts.append(
                 {
@@ -1035,7 +1076,7 @@ async def _process_scenario(
         ):
             continue
 
-        covenant = _covenant_from_extract(
+        covenant, denominator_shape = _covenant_from_extract(
             extracted,
             scenario_id=scenario_id,
             slot=slot,
@@ -1043,7 +1084,7 @@ async def _process_scenario(
             pages=pages,
             fallback_page=fallback_page,
         )
-        results.append((covenant, verification, validation_issues))
+        results.append((covenant, verification, validation_issues, denominator_shape))
 
     return results
 
@@ -1059,7 +1100,7 @@ async def _run_async(work_dir: Path) -> StageResult:
         serialized: list[dict[str, Any]] = []
 
         scenarios = bound["scenarios"]
-        extracted_by_scenario: dict[str, dict[str, tuple[Covenant, dict[str, bool]]]] = {}
+        extracted_by_scenario: dict[str, dict[str, tuple[Covenant, dict[str, bool], str | None]]] = {}
 
         for scenario_id in sorted({scenario for scenario, _slot in template_cells(template)}):
             loan_doc_id = scenarios.get(scenario_id, {}).get("loan")
@@ -1078,16 +1119,22 @@ async def _run_async(work_dir: Path) -> StageResult:
                 conflicts=conflicts,
             )
             extracted_by_scenario[scenario_id] = {
-                covenant.slot: (covenant, verification)
-                for covenant, verification, _issues in scenario_results
+                covenant.slot: (covenant, verification, denominator_shape)
+                for covenant, verification, _issues, denominator_shape in scenario_results
             }
 
         for scenario_id, slot in template_cells(template):
             loan_doc_id = scenarios.get(scenario_id, {}).get("loan")
             extracted_by_slot = extracted_by_scenario.get(scenario_id, {})
             if slot in extracted_by_slot:
-                covenant, verification = extracted_by_slot[slot]
-                serialized.append(_serialize_covenant(covenant, verification))
+                covenant, verification, denominator_shape = extracted_by_slot[slot]
+                serialized.append(
+                    _serialize_covenant(
+                        covenant,
+                        verification,
+                        denominator_shape=denominator_shape,
+                    )
+                )
             elif loan_doc_id:
                 if slot in {f"6.{s}" for s in SLOTS}:
                     _raise_extraction_failure(
@@ -1149,6 +1196,10 @@ async def _run_async(work_dir: Path) -> StageResult:
         ),
     )
 
+    unstable_field_count = sum(
+        1 for conflict in stable_conflicts if conflict.get("kind") == EXTRACTION_UNSTABLE
+    )
+
     payload = {
         "covenants": serialized,
         "conflicts": stable_conflicts,
@@ -1156,6 +1207,7 @@ async def _run_async(work_dir: Path) -> StageResult:
             "count": len(serialized),
             "springing_count": springing_count,
             "slot_6_2_directions": sorted(slot_62_directions),
+            "unstable_field_count": unstable_field_count,
         },
     }
 
@@ -1167,10 +1219,15 @@ async def _run_async(work_dir: Path) -> StageResult:
 
     print(
         f"s4a_covenants: extracted={len(serialized)} springing={springing_count} "
-        f"6.2_directions={sorted(slot_62_directions)} conflicts={len(conflicts)}",
+        f"6.2_directions={sorted(slot_62_directions)} conflicts={len(conflicts)} "
+        f"unstable_fields={unstable_field_count}",
     )
 
-    return StageResult(item_count=len(serialized), row_count=springing_count)
+    return StageResult(
+        item_count=len(serialized),
+        row_count=springing_count,
+        unstable_field_count=unstable_field_count,
+    )
 
 
 def run(*, work_dir: Path) -> StageResult:

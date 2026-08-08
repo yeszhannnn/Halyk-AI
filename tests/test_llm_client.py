@@ -60,6 +60,19 @@ def test_usage_fields_reads_anthropic_token_names() -> None:
     }
 
 
+def test_cache_key_differs_by_pass_index() -> None:
+    base_kwargs = {
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+        "messages": [{"role": "user", "content": "hello"}],
+        "params": {"temperature": 0},
+    }
+    voted_key = _cache_key(**base_kwargs)
+    pass_keys = [_cache_key(**base_kwargs, pass_index=index) for index in range(3)]
+    assert len(set(pass_keys)) == 3
+    assert voted_key not in pass_keys
+
+
 def test_cache_key_includes_provider() -> None:
     openai_key = _cache_key(
         provider="openai",

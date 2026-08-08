@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -12,8 +12,8 @@ import pandas as pd
 
 from agent.evidence.quotes import verify_extracted_fields, verify_quote
 from agent.llm.client import LLMClient
+from agent.llm.extraction_vote import EXTRACTION_UNSTABLE
 from agent.llm.schemas.adjustments import AdjustmentExtract, VisionAdjustmentsExtract
-from agent.llm.vision_guard import complete_vision_dual
 from agent.models import Provenance
 from agent.parsing.numbers import capture_absent_values, normalize_decimal
 from agent.shape import is_canonical_open_dataset
@@ -281,7 +281,7 @@ def _match_txn_in_ledger(
 def _fx_rate(settlement_usd: Decimal, source_amount: Decimal) -> Decimal:
     if source_amount == 0:
         return Decimal("0")
-    return (settlement_usd / source_amount).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+    return settlement_usd / source_amount
 
 
 def _serialize_adjustment(
@@ -520,8 +520,7 @@ async def _classify_vision_pages(
         f"Pages: {page_label}\n\n"
         f"{VISION_PROMPT}"
     )
-    extracted, digit_mismatches = await complete_vision_dual(
-        client,
+    extracted, unstable_fields = await client.complete_vision_voted(
         response_model=VisionAdjustmentsExtract,
         system_prompt=SYSTEM_PROMPT,
         prompt=prompt,
@@ -536,7 +535,7 @@ async def _classify_vision_pages(
     return (
         [_apply_kind_overrides(item, "\n".join(pages)) for item in extracted.items],
         "ocr",
-        digit_mismatches,
+        unstable_fields,
     )
 
 
@@ -741,7 +740,7 @@ async def _run_async(work_dir: Path) -> StageResult:
                     page_numbers = [page for page, _ in page_paths]
                     image_paths = [path for _, path in page_paths]
                     with capture_absent_values() as absent_fields:
-                        vision_items, vision_source_kind, digit_mismatches = await _classify_vision_pages(
+                        vision_items, vision_source_kind, vision_unstable = await _classify_vision_pages(
                             client,
                             scenario_id=scenario_id,
                             doc_id=doc_id,
@@ -758,8 +757,8 @@ async def _run_async(work_dir: Path) -> StageResult:
                                 "doc_id": doc_id,
                             },
                         )
-                    review.extend(digit_mismatches)
-                    conflicts.extend(digit_mismatches)
+                    review.extend(vision_unstable)
+                    conflicts.extend(vision_unstable)
                     for index, item in enumerate(vision_items, start=1):
                         page = page_numbers[min(index - 1, len(page_numbers) - 1)]
                         adjustment_id = _vision_adjustment_id(scenario_id, page, index)
@@ -803,6 +802,10 @@ async def _run_async(work_dir: Path) -> StageResult:
         seen_keys.add(key)
         deduped[adjustment_id] = adjustment
 
+    unstable_field_count = sum(
+        1 for conflict in conflicts if conflict.get("kind") == EXTRACTION_UNSTABLE
+    )
+
     payload = {
         "adjustments": deduped,
         "conflicts": conflicts,
@@ -815,6 +818,7 @@ async def _run_async(work_dir: Path) -> StageResult:
             "unrecognised_count": len(unrecognised),
             "conflict_count": len(conflicts),
             "review_count": len(review),
+            "unstable_field_count": unstable_field_count,
         },
     }
 
@@ -831,10 +835,15 @@ async def _run_async(work_dir: Path) -> StageResult:
 
     print(
         f"s4c_adjustments: adjustments={len(deduped)} "
-        f"unrecognised={len(unrecognised)} conflicts={len(conflicts)} review={len(review)}",
+        f"unrecognised={len(unrecognised)} conflicts={len(conflicts)} review={len(review)} "
+        f"unstable_fields={unstable_field_count}",
     )
 
-    return StageResult(item_count=len(deduped), row_count=len(deduped))
+    return StageResult(
+        item_count=len(deduped),
+        row_count=len(deduped),
+        unstable_field_count=unstable_field_count,
+    )
 
 
 def run(*, work_dir: Path) -> StageResult:

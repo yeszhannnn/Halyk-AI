@@ -557,6 +557,44 @@ def test_p4_6_1_mistagged_revenue_numerator_uses_adjusted_ebitda() -> None:
     assert actual < Decimal("0.33") + Decimal("0.01")
 
 
+def test_p7_6_1_opex_denominator_uses_derived_ebitda() -> None:
+    covenants = json.loads((OPEN / "04a_covenants.json").read_text(encoding="utf-8"))["covenants"]
+    covenant = copy.deepcopy(
+        next(c for c in covenants if c["scenario_id"] == "P7" and c["slot"] == "6.1")
+    )
+    covenant["metric"]["denominator"]["include_keywords"] = ["opex"]
+    covenant["metric"]["numerator"]["include_keywords"] = ["tax", "utilities"]
+    notes = _metric_notes(covenant["metric"]["notes"])
+    assert _is_ebitda_leg(covenant["metric"]["denominator"], notes, leg="denominator")
+    denominator = describe_leg_breakdown(
+        covenant,
+        _ledger(),
+        leg="denominator",
+        adjustments=_adjustments(),
+        work_dir=OPEN,
+    )
+    assert denominator.kind == "derived"
+    assert denominator.shape == "derived_ebitda"
+    assert denominator.value == Decimal("2728878.76")
+
+
+def test_fx_rates_prefers_settlement_over_stored_rate() -> None:
+    from agent.stages.s5_ledger import _fx_rates
+
+    adjustments = {
+        "adj_p3_fx": {
+            "kind": "FX",
+            "scenario_id": "P3",
+            "fx_source_amount": "72146.75",
+            "fx_settlement_usd": "83690.23",
+            "rate": "1.16",
+        },
+    }
+    rate, _ = _fx_rates(adjustments)["P3"]
+    expected = Decimal("83690.23") / Decimal("72146.75")
+    assert rate == expected
+
+
 def test_fx_normalisation_preserves_sign_and_covers_all_rows() -> None:
     from agent.stages.s5_ledger import _fx_rates, _normalize_fx
 

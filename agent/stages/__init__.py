@@ -5,3 +5,4 @@ from dataclasses import dataclass
 class StageResult:
     item_count: int
     row_count: int | None = None
+    unstable_field_count: int | None = None

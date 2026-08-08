@@ -93,7 +93,12 @@ def _missing_outputs(work_dir: Path, outputs: Sequence[str]) -> list[str]:
 
 def _log_stage(stage_name: str, elapsed_ms: int, result: StageResult) -> None:
     row_part = f" rows={result.row_count}" if result.row_count is not None else ""
-    print(f"{stage_name}: {elapsed_ms}ms items={result.item_count}{row_part}")
+    unstable_part = (
+        f" unstable={result.unstable_field_count}"
+        if result.unstable_field_count is not None
+        else ""
+    )
+    print(f"{stage_name}: {elapsed_ms}ms items={result.item_count}{row_part}{unstable_part}")
 
 
 def _past_deadline() -> bool:
@@ -189,6 +194,7 @@ def _run_pipeline(argv: Sequence[str]) -> int:
             "elapsed_ms": elapsed_ms,
             "items": result.item_count,
             "rows": result.row_count,
+            "unstable_fields": result.unstable_field_count,
         }
         _log_stage(spec.name, elapsed_ms, result)
 

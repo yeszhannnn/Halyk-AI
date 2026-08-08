@@ -13,6 +13,7 @@ from agent.llm.client import LLMClient, REPLAY_DIR
 T = TypeVar("T", bound=BaseModel)
 
 DUAL_PASS_DELAY_SECONDS = 1.0
+VOTE_PASS_DELAY_SECONDS = DUAL_PASS_DELAY_SECONDS
 
 
 def _is_numeric(value: Any) -> bool:

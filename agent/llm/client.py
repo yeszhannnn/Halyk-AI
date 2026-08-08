@@ -207,14 +207,17 @@ def _cache_key(
     messages: list[dict[str, Any]],
     params: dict[str, Any],
     image_digests: list[str] | None = None,
+    pass_index: int | None = None,
 ) -> str:
-    payload = {
+    payload: dict[str, Any] = {
         "provider": provider,
         "model": model,
         "messages": messages,
         "params": params,
         "image_digests": image_digests or [],
     }
+    if pass_index is not None:
+        payload["pass_index"] = pass_index
     digest = hashlib.sha256(
         json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8"),
     )
@@ -571,6 +574,7 @@ class LLMClient:
         response_model: type[T],
         messages: list[dict[str, Any]],
         use_cache: bool = True,
+        pass_index: int | None = None,
         validation_context: dict[str, Any] | None = None,
         **params: Any,
     ) -> T:
@@ -581,6 +585,7 @@ class LLMClient:
             model=self.model,
             messages=serializable_messages,
             params=request_params,
+            pass_index=pass_index,
         )
 
         if REPLAY_DIR is not None:
@@ -632,6 +637,7 @@ class LLMClient:
         messages: list[dict[str, Any]],
         quote_checks: Callable[[T], list[tuple[str, str, str]]],
         validation_context: dict[str, Any] | None = None,
+        pass_index: int | None = None,
         **params: Any,
     ) -> T:
         from agent.evidence.quotes import apply_quote_verification_with_retry
@@ -640,6 +646,7 @@ class LLMClient:
             response_model=response_model,
             messages=messages,
             validation_context=validation_context,
+            pass_index=pass_index,
             **params,
         )
         if REPLAY_DIR is not None:
@@ -666,6 +673,7 @@ class LLMClient:
                 response_model=response_model,
                 messages=retry_messages,
                 validation_context=validation_context,
+                pass_index=pass_index,
                 **params,
             )
             payload = result.model_dump(mode="python")
@@ -679,6 +687,82 @@ class LLMClient:
             context=validation_context,
         )
 
+    async def complete_verified_voted(
+        self,
+        *,
+        response_model: type[T],
+        messages: list[dict[str, Any]],
+        quote_checks: Callable[[T], list[tuple[str, str, str]]],
+        validation_context: dict[str, Any] | None = None,
+        context: dict[str, Any] | None = None,
+        use_cache: bool = True,
+        **params: Any,
+    ) -> tuple[T, list[dict[str, Any]]]:
+        """Run three independent verified extractions and vote per leaf field."""
+        from agent.llm.extraction_vote import VOTE_PASS_COUNT, VOTE_PASS_DELAY_SECONDS, vote_fields
+
+        request_params = _build_request_params(**params)
+        serializable_messages = json.loads(json.dumps(messages, ensure_ascii=False))
+        voted_cache_key = _cache_key(
+            provider=self.provider,
+            model=self.model,
+            messages=serializable_messages,
+            params=request_params,
+        )
+
+        if REPLAY_DIR is not None:
+            result = await self.complete_verified(
+                response_model=response_model,
+                messages=messages,
+                quote_checks=quote_checks,
+                validation_context=validation_context,
+                use_cache=use_cache,
+                **params,
+            )
+            return result, []
+
+        if use_cache and RECORD_DIR is None:
+            cached = _read_cache(voted_cache_key, response_model, self.counter)
+            if cached is not None:
+                return cached, []
+
+        passes: list[T] = []
+        for pass_index in range(VOTE_PASS_COUNT):
+            if pass_index:
+                await asyncio.sleep(VOTE_PASS_DELAY_SECONDS)
+            passes.append(
+                await self.complete_verified(
+                    response_model=response_model,
+                    messages=messages,
+                    quote_checks=quote_checks,
+                    validation_context=validation_context,
+                    pass_index=pass_index,
+                    use_cache=use_cache,
+                    **params,
+                ),
+            )
+
+        voted, unstable = vote_fields(
+            passes,
+            response_model,
+            context=context,
+            validation_context=validation_context,
+        )
+
+        if use_cache and RECORD_DIR is None:
+            _write_cache(
+                voted_cache_key,
+                response=voted,
+                usage={
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                },
+                cost_usd=Decimal("0"),
+            )
+
+        return voted, unstable
+
     async def complete_vision(
         self,
         *,
@@ -687,6 +771,7 @@ class LLMClient:
         image_paths: list[Path],
         system_prompt: str | None = None,
         use_cache: bool = True,
+        pass_index: int | None = None,
         **params: Any,
     ) -> T:
         content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
@@ -707,6 +792,7 @@ class LLMClient:
             messages=serializable_messages,
             params=request_params,
             image_digests=image_digests,
+            pass_index=pass_index,
         )
 
         if REPLAY_DIR is not None:
@@ -745,3 +831,84 @@ class LLMClient:
                 cost_usd=cost,
             )
         return parsed
+
+    async def complete_vision_voted(
+        self,
+        *,
+        response_model: type[T],
+        prompt: str,
+        image_paths: list[Path],
+        system_prompt: str | None = None,
+        context: dict[str, Any] | None = None,
+        use_cache: bool = True,
+        **params: Any,
+    ) -> tuple[T, list[dict[str, Any]]]:
+        """Run three independent vision extractions and vote per leaf field."""
+        from agent.llm.extraction_vote import VOTE_PASS_COUNT, VOTE_PASS_DELAY_SECONDS, vote_fields
+
+        paths = list(image_paths)
+        request_params = _build_request_params(**params)
+        content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+        for image_path in paths:
+            content.append(vision_image_block(image_path))
+        vision_messages: list[dict[str, Any]] = []
+        if system_prompt:
+            vision_messages.append({"role": "system", "content": system_prompt})
+        vision_messages.append({"role": "user", "content": content})
+        serializable_messages = json.loads(json.dumps(vision_messages, ensure_ascii=False))
+        image_digests = [_image_digest(path) for path in paths]
+        voted_cache_key = _cache_key(
+            provider=self.provider,
+            model=self.model,
+            messages=serializable_messages,
+            params=request_params,
+            image_digests=image_digests,
+        )
+
+        if REPLAY_DIR is not None:
+            result = await self.complete_vision(
+                response_model=response_model,
+                prompt=prompt,
+                image_paths=paths,
+                system_prompt=system_prompt,
+                use_cache=use_cache,
+                **params,
+            )
+            return result, []
+
+        if use_cache and RECORD_DIR is None:
+            cached = _read_cache(voted_cache_key, response_model, self.counter)
+            if cached is not None:
+                return cached, []
+
+        passes: list[T] = []
+        for pass_index in range(VOTE_PASS_COUNT):
+            if pass_index:
+                await asyncio.sleep(VOTE_PASS_DELAY_SECONDS)
+            passes.append(
+                await self.complete_vision(
+                    response_model=response_model,
+                    prompt=prompt,
+                    image_paths=paths,
+                    system_prompt=system_prompt,
+                    pass_index=pass_index,
+                    use_cache=use_cache,
+                    **params,
+                ),
+            )
+
+        voted, unstable = vote_fields(passes, response_model, context=context)
+
+        if use_cache and RECORD_DIR is None:
+            _write_cache(
+                voted_cache_key,
+                response=voted,
+                usage={
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                },
+                cost_usd=Decimal("0"),
+            )
+
+        return voted, unstable

@@ -63,12 +63,12 @@ def _fx_rates(adjustments: dict[str, Any]) -> dict[str, tuple[Decimal, str]]:
     for adj_id, adj in adjustments.items():
         if adj.get("kind") != "FX":
             continue
-        rate = _decimal_or_none(adj.get("rate"))
-        if rate is None:
-            source_amt = _decimal_or_none(adj.get("fx_source_amount"))
-            settlement = _decimal_or_none(adj.get("fx_settlement_usd"))
-            if source_amt and settlement and source_amt != 0:
-                rate = settlement / source_amt
+        source_amt = _decimal_or_none(adj.get("fx_source_amount"))
+        settlement = _decimal_or_none(adj.get("fx_settlement_usd"))
+        if source_amt and settlement and source_amt != 0:
+            rate = settlement / source_amt
+        else:
+            rate = _decimal_or_none(adj.get("rate"))
         if rate is not None:
             rates[str(adj["scenario_id"])] = (rate, adj_id)
     return rates

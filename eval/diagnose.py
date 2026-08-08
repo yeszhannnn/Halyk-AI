@@ -587,6 +587,8 @@ def _print_leg_breakdown(
         f"  {breakdown.kind} ({breakdown.row_count} rows, "
         f"categories={breakdown.category_count}, subtotal={breakdown.value}):"
     )
+    if breakdown.shape:
+        print(f"    shape: {breakdown.shape}")
     if breakdown.flags:
         print(f"    flags: {', '.join(breakdown.flags)}")
     if breakdown.category_count > 3:
@@ -697,6 +699,11 @@ def print_cell_breakdown(work_dir: Path, scenario_id: str, slot: str) -> None:
         print(f"  metric flags: {', '.join(metric_metadata['flags'])}")
     if metric_metadata.get("strategy"):
         print(f"  strategy: {metric_metadata['strategy']}")
+    legs_meta = metric_metadata.get("legs") or {}
+    for leg_name, leg_info in legs_meta.items():
+        shape = leg_info.get("shape")
+        if shape:
+            print(f"  {leg_name} shape: {shape}")
 
 
 def run_reference_checks(work_dir: Path) -> None:
@@ -758,10 +765,21 @@ def run_reference_checks(work_dir: Path) -> None:
 
     fx = [adj for adj in adjustments.values() if adj.get("kind") == "FX"]
     if fx:
-        rate = _to_decimal(fx[0].get("rate"))
-        _print_check("FX rate 1.16", rate == Decimal("1.16"), str(rate))
+        adj = fx[0]
+        source = _to_decimal(adj.get("fx_source_amount"))
+        settlement = _to_decimal(adj.get("fx_settlement_usd"))
+        rate = _to_decimal(adj.get("rate"))
+        if source and settlement and source != 0:
+            expected = settlement / source
+            _print_check(
+                "FX rate from settlement/source",
+                rate == expected,
+                f"stored={rate} expected={expected}",
+            )
+        else:
+            _print_check("FX rate from settlement/source", False, "missing amounts")
     else:
-        _print_check("FX rate 1.16", False, "missing")
+        _print_check("FX rate from settlement/source", False, "missing")
 
     for expected in [Decimal("1104663.28"), Decimal("592296.10")]:
         matches = [
