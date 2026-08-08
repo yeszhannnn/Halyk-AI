@@ -39,12 +39,36 @@ from agent.template import load_template, template_cells
 logger = logging.getLogger(__name__)
 
 ARTICLE_6_HEADING = re.compile(
-    r"Статья 6\s*[—–-]\s*Финансовые ковенанты",
+    r"(?:Статья 6\s*[—–-]\s*Финансовые ковенанты"
+    r"|Article 6\s*[—–-]\s*Financial Covenants)",
     re.IGNORECASE,
 )
-ARTICLE_7_HEADING = re.compile(r"Статья 7\b", re.IGNORECASE)
-PUNKT_MARKER = re.compile(r"Пункт 6\.(\d+)")
-REQUIRED_PUNKT_MARKERS = ("Пункт 6.1", "Пункт 6.2", "Пункт 6.3")
+ARTICLE_7_HEADING = re.compile(r"(?:Статья 7|Article 7)\b", re.IGNORECASE)
+PUNKT_MARKER = re.compile(r"(?:Пункт|Clause|Section) 6\.(\d+)", re.IGNORECASE)
+REQUIRED_PUNKT_SLOTS = ("1", "2", "3")
+COVENANT_PERIOD_RE = re.compile(
+    r"(?:"
+    r"за\s+период\s+с\s+(?P<start_ru>\d{4}-\d{2}-\d{2})\s+по\s+(?P<end_ru>\d{4}-\d{2}-\d{2})"
+    r"|"
+    r"for\s+the\s+period\s+from\s+(?P<start_en>\d{4}-\d{2}-\d{2})\s+to\s+(?P<end_en>\d{4}-\d{2}-\d{2})"
+    r"|"
+    r"during\s+the\s+period\s+from\s+(?P<start_en2>\d{4}-\d{2}-\d{2})\s+to\s+(?P<end_en2>\d{4}-\d{2}-\d{2})"
+    r")",
+    re.IGNORECASE,
+)
+COVENANT_PERIOD_LABELS = (
+    "за период",
+    "for the period",
+    "during the period",
+    "ковенантный период",
+    "covenant period",
+)
+SUB_PERIOD_PHRASES = (
+    "четвёрт",
+    "четверт",
+    "fourth quarter",
+    "q4",
+)
 THRESHOLD_RATIO_RE = re.compile(
     r"(?<![\d,.])(\d+(?:[.,]\d+)?)\s*[xх×X]",
 )
@@ -61,6 +85,7 @@ THRESHOLD_USD_MIN = Decimal("1000")
 ZERO_THRESHOLD_MARKERS = ("0", "0.0", "0,0", "ноль", "zero")
 MAX_INVALID_COVENANT_FRACTION = Decimal("0.2")
 MAX_EXTRACTION_ATTEMPTS = 3
+EXTRACTION_FAILED = "EXTRACTION_FAILED"
 
 OPEX_KEYWORDS = frozenset({"opex"} | set(OPEX_SLUGS))
 
@@ -98,7 +123,8 @@ FLAT_SYSTEM_PROMPT = (
   не менее / not fall below / обеспечить не ниже → MIN). Never infer direction from the title alone.
 - threshold_unit is USD for dollar amounts, RATIO for multipliers like 0.04x or 1.20x.
 - period_start and period_end must reflect the measurement period stated in the clause.
-  Most covenants use 2025-01-01 through 2025-12-31; some specify a sub-period (e.g. fourth quarter).
+  Most covenants use 2025-01-01 through 2025-12-31; some specify a sub-period
+  (e.g. четвёртый квартал / fourth quarter).
 - When a springing trigger is expected, extract only the trigger operator, value, and condition quote.
   Do not extract the nested springing metric in this step.
 """
@@ -143,6 +169,47 @@ SPRINGING_TRIGGER_PHRASES: tuple[tuple[str, str], ...] = (
     ("if the aggregate", "en_if_aggregate"),
     ("if aggregate", "en_if_aggregate_short"),
 )
+
+
+def _punkt_marker_present(section: str, slot: str) -> bool:
+    normalized = section.casefold()
+    for prefix in ("пункт", "clause", "section"):
+        if f"{prefix} 6.{slot}".casefold() in normalized:
+            return True
+    return False
+
+
+def _missing_punkt_slots(section: str) -> list[str]:
+    return [slot for slot in REQUIRED_PUNKT_SLOTS if not _punkt_marker_present(section, slot)]
+
+
+def _extract_period_candidates(text: str) -> list[tuple[date, date, str]]:
+    candidates: list[tuple[date, date, str]] = []
+    seen: set[tuple[date, date]] = set()
+    for match in COVENANT_PERIOD_RE.finditer(text):
+        start_raw = (
+            match.group("start_ru")
+            or match.group("start_en")
+            or match.group("start_en2")
+        )
+        end_raw = (
+            match.group("end_ru") or match.group("end_en") or match.group("end_en2")
+        )
+        if not start_raw or not end_raw:
+            continue
+        period = (date.fromisoformat(start_raw), date.fromisoformat(end_raw))
+        if period in seen:
+            continue
+        seen.add(period)
+        candidates.append((period[0], period[1], match.group(0)))
+    return candidates
+
+
+def _format_period_candidates(candidates: list[tuple[date, date, str]]) -> str:
+    return ", ".join(
+        f"{quote} ({start.isoformat()}..{end.isoformat()})"
+        for start, end, quote in candidates
+    )
 
 
 def _detect_springing_trigger(text: str) -> str | None:
@@ -260,6 +327,16 @@ def _append_retry_line(content: str, retry_line: str | None) -> str:
     return f"{content}\n\nRetry: {retry_line}"
 
 
+def _nonempty_quote_checks(
+    checks: list[tuple[str, str, str]],
+) -> list[tuple[str, str, str]]:
+    return [
+        (field_name, quote, page_text)
+        for field_name, quote, page_text in checks
+        if str(quote or "").strip()
+    ]
+
+
 def _flat_quote_checks(
     result: CovenantFlatNoSpringing | CovenantFlatWithSpringing,
     verification_text: str,
@@ -281,7 +358,7 @@ def _flat_quote_checks(
                 ("springing_condition", result.springing_condition_quote, verification_text),
             ],
         )
-    return checks
+    return _nonempty_quote_checks(checks)
 
 
 def _metric_quote_checks(
@@ -333,7 +410,7 @@ def _metric_quote_checks(
                 verification_text,
             ),
         )
-    return checks
+    return _nonempty_quote_checks(checks)
 
 
 def _format_flat_context(
@@ -464,6 +541,25 @@ def _raise_extraction_failure(
     )
 
 
+def _record_extraction_failure(
+    conflicts: list[dict[str, Any]],
+    *,
+    scenario_id: str,
+    slot: str,
+    message: str,
+    doc_id: str | None = None,
+) -> None:
+    conflict: dict[str, Any] = {
+        "kind": EXTRACTION_FAILED,
+        "scenario_id": scenario_id,
+        "slot": slot,
+        "message": message,
+    }
+    if doc_id is not None:
+        conflict["doc_id"] = doc_id
+    conflicts.append(conflict)
+
+
 def _extract_article_6(pages: list[str]) -> str:
     full_text = "\n".join(pages)
     matches = list(ARTICLE_6_HEADING.finditer(full_text))
@@ -476,9 +572,11 @@ def _extract_article_6(pages: list[str]) -> str:
     end = article_7.start() if article_7 else len(remainder)
     section = remainder[:end].strip()
 
-    missing = [marker for marker in REQUIRED_PUNKT_MARKERS if marker not in section]
+    missing = _missing_punkt_slots(section)
     if missing:
-        raise ValueError(f"Article 6 section missing required markers: {', '.join(missing)}")
+        raise ValueError(
+            f"Article 6 section missing required markers: {', '.join(f'6.{slot}' for slot in missing)}",
+        )
 
     return section
 
@@ -562,7 +660,7 @@ def _quote_checks(result: CovenantExtract, verification_text: str) -> list[tuple
             )
     if result.springing is not None:
         checks.extend(_springing_quote_checks(result.springing, verification_text))
-    return checks
+    return _nonempty_quote_checks(checks)
 
 
 def _springing_quote_checks(
@@ -585,7 +683,7 @@ def _springing_quote_checks(
             verification_text,
         ),
     )
-    return checks
+    return _nonempty_quote_checks(checks)
 
 
 def _prefer_ebitda_denominator_shape(
@@ -773,7 +871,7 @@ def _serialize_covenant(
     denominator_shape: str | None = None,
 ) -> dict[str, Any]:
     period_start, period_end = covenant.period
-    return {
+    payload = {
         "scenario_id": covenant.scenario_id,
         "slot": covenant.slot,
         "title": covenant.title,
@@ -789,6 +887,7 @@ def _serialize_covenant(
         "source": _serialize_provenance(covenant.source),
         "verification": verification,
     }
+    return payload
 
 
 def _collect_verification_flags(payload: dict[str, Any]) -> dict[str, bool]:
@@ -1068,6 +1167,7 @@ async def _extract_covenant_item(
 ) -> tuple[CovenantExtract, dict[str, bool], list[dict[str, Any]], bool]:
     unstable_fields: list[dict[str, Any]] = []
     candidates = threshold_candidates or _extract_threshold_candidates(item_text)
+    period_candidates = _extract_period_candidates(item_text)
     active_candidates = threshold_candidates
     flat_retry: str | None = None
     metric_retry: str | None = None
@@ -1105,6 +1205,11 @@ async def _extract_covenant_item(
             content += (
                 "\n\nThe threshold must be exactly one of these values found in the clause: "
                 f"{_format_threshold_candidates(active_candidates)}."
+            )
+        if period_candidates:
+            content += (
+                "\n\nThe covenant period must match one of these phrases found in the clause: "
+                f"{_format_period_candidates(period_candidates)}."
             )
         return content
 
@@ -1273,23 +1378,45 @@ async def _process_scenario(
     ledger_categories: list[str],
     conflicts: list[dict[str, Any]],
 ) -> tuple[list[tuple[Covenant, dict[str, bool], list[dict[str, Any]], str | None]], int]:
-    section = _extract_article_6(pages)
-    items = _split_punkts(section)
+    try:
+        section = _extract_article_6(pages)
+        items = _split_punkts(section)
+    except Exception as exc:
+        for slot in SLOTS:
+            _record_extraction_failure(
+                conflicts,
+                scenario_id=scenario_id,
+                slot=f"6.{slot}",
+                message=str(exc),
+                doc_id=doc_id,
+            )
+        return [], 0
+
     results: list[tuple[Covenant, dict[str, bool], list[dict[str, Any]], str | None]] = []
     retry_clause_count = 0
 
     for slot in SLOTS:
         item_text = items[slot]
         fallback_page, _, _ = _page_span_for_text(pages, item_text[:120])
-        with capture_absent_values() as absent_fields:
-            extracted, verification, unstable_fields, needed_retry = await _extract_covenant_item(
-                client,
+        try:
+            with capture_absent_values() as absent_fields:
+                extracted, verification, unstable_fields, needed_retry = await _extract_covenant_item(
+                    client,
+                    scenario_id=scenario_id,
+                    slot=slot,
+                    item_text=item_text,
+                    verification_text=item_text,
+                    ledger_categories=ledger_categories,
+                )
+        except CovenantExtractionError as exc:
+            _record_extraction_failure(
+                conflicts,
                 scenario_id=scenario_id,
-                slot=slot,
-                item_text=item_text,
-                verification_text=item_text,
-                ledger_categories=ledger_categories,
+                slot=exc.slot,
+                message=str(exc),
+                doc_id=doc_id,
             )
+            continue
         if needed_retry:
             retry_clause_count += 1
         conflicts.extend(unstable_fields)
@@ -1386,11 +1513,8 @@ async def _run_async(work_dir: Path) -> StageResult:
                 )
             elif loan_doc_id:
                 if slot in {f"6.{s}" for s in SLOTS}:
-                    _raise_extraction_failure(
-                        scenario_id=scenario_id,
-                        slot=slot.removeprefix("6."),
-                        message="covenant missing after extraction",
-                    )
+                    serialized.append(_placeholder_covenant(scenario_id, slot))
+                    continue
                 conflicts.append(
                     {
                         "kind": "NEW_SLOT",
@@ -1448,6 +1572,9 @@ async def _run_async(work_dir: Path) -> StageResult:
     unstable_field_count = sum(
         1 for conflict in stable_conflicts if conflict.get("kind") == EXTRACTION_UNSTABLE
     )
+    extraction_failed_count = sum(
+        1 for conflict in stable_conflicts if conflict.get("kind") == EXTRACTION_FAILED
+    )
 
     payload = {
         "covenants": serialized,
@@ -1457,6 +1584,7 @@ async def _run_async(work_dir: Path) -> StageResult:
             "springing_count": springing_count,
             "slot_6_2_directions": sorted(slot_62_directions),
             "unstable_field_count": unstable_field_count,
+            "extraction_failed_count": extraction_failed_count,
             "retry_clause_count": retry_clause_count,
         },
     }
@@ -1470,7 +1598,8 @@ async def _run_async(work_dir: Path) -> StageResult:
     print(
         f"s4a_covenants: extracted={len(serialized)} springing={springing_count} "
         f"6.2_directions={sorted(slot_62_directions)} conflicts={len(conflicts)} "
-        f"unstable_fields={unstable_field_count} retry_clauses={retry_clause_count}",
+        f"unstable_fields={unstable_field_count} extraction_failed={extraction_failed_count} "
+        f"retry_clauses={retry_clause_count}",
     )
 
     return StageResult(

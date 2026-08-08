@@ -15,17 +15,60 @@ from agent.stages import StageResult
 MARKERS: list[tuple[str, re.Pattern[str]]] = [
     (
         "SUPERSEDED_DRAFT",
-        re.compile(r"ЗАМЕНЕНА ОКОНЧАТЕЛЬНЫМ|ПРОЕКТ|не может служить основанием"),
+        re.compile(
+            r"ЗАМЕНЕНА ОКОНЧАТЕЛЬНЫМ|ПРОЕКТ|не может служить основанием"
+            r"|SUPERSEDED BY FINAL|DRAFT|NOT TO BE RELIED UPON",
+            re.IGNORECASE,
+        ),
     ),
-    ("LOAN_SUPERSEDED", re.compile(r"НЕ ПРИМЕНЯЕТСЯ|НЕДЕЙСТВУЮЩАЯ РЕДАКЦИЯ")),
-    ("LOAN", re.compile(r"ИСПОЛНИТЕЛЬНЫЙ ЭКЗЕМПЛЯР|Старший обеспеченный заём")),
-    ("AUDIT_NOTES", re.compile(r"АУДИТОРСКОЕ ДЕЛО|Примечания к финансовой отчётности")),
+    (
+        "LOAN_SUPERSEDED",
+        re.compile(
+            r"НЕ ПРИМЕНЯЕТСЯ|НЕДЕЙСТВУЮЩАЯ РЕДАКЦИЯ"
+            r"|SUPERSEDED|NOT APPLICABLE|PRIOR VERSION|NO LONGER IN FORCE",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "LOAN",
+        re.compile(
+            r"ИСПОЛНИТЕЛЬНЫЙ ЭКЗЕМПЛЯР|Старший обеспеченный заём"
+            r"|EXECUTION COPY|SENIOR SECURED LOAN|CONFIDENTIAL\s*[·•]\s*EXECUTION",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "AUDIT_NOTES",
+        re.compile(
+            r"АУДИТОРСКОЕ ДЕЛО|Примечания к финансовой отчётности"
+            r"|NOTES TO THE FINANCIAL STATEMENTS|AUDIT FILE",
+            re.IGNORECASE,
+        ),
+    ),
     (
         "ADJUSTMENT_SOURCE",
-        re.compile(r"Отчёт о выполнении согласованных процедур|Служебная записка казначейства"),
+        re.compile(
+            r"Отчёт о выполнении согласованных процедур|Служебная записка казначейства"
+            r"|AGREED-UPON PROCEDURES|TREASURY MEMORANDUM",
+            re.IGNORECASE,
+        ),
     ),
-    ("KYC", re.compile(r"Знай своего клиента|НАДЛЕЖАЩАЯ ПРОВЕРКА КЛИЕНТА")),
-    ("AUDIT_PLANNING", re.compile(r"Внешний аудит — Записка о планировании")),
+    (
+        "KYC",
+        re.compile(
+            r"Знай своего клиента|НАДЛЕЖАЩАЯ ПРОВЕРКА КЛИЕНТА"
+            r"|KNOW YOUR CUSTOMER|KYC|CUSTOMER DUE DILIGENCE",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "AUDIT_PLANNING",
+        re.compile(
+            r"Внешний аудит — Записка о планировании"
+            r"|EXTERNAL AUDIT — PLANNING|PLANNING MEMORANDUM",
+            re.IGNORECASE,
+        ),
+    ),
 ]
 
 VALID_DOC_TYPES = {name for name, _ in MARKERS} | {"NOISE"}
@@ -45,17 +88,26 @@ EXPECTED_PDF_COUNTS: dict[str, int] = {
 
 CLASSIFY_SYSTEM_PROMPT = """You classify bank PDF documents from scanned page images.
 
-Assign exactly one doc_type by checking markers in this strict order (first match wins):
-1. SUPERSEDED_DRAFT — markers: "ЗАМЕНЕНА ОКОНЧАТЕЛЬНЫМ", "ПРОЕКТ", "не может служить основанием"
-2. LOAN_SUPERSEDED — markers: "НЕ ПРИМЕНЯЕТСЯ", "НЕДЕЙСТВУЮЩАЯ РЕДАКЦИЯ"
-3. LOAN — markers: "ИСПОЛНИТЕЛЬНЫЙ ЭКЗЕМПЛЯР", "Старший обеспеченный заём"
-4. AUDIT_NOTES — markers: "АУДИТОРСКОЕ ДЕЛО", "Примечания к финансовой отчётности"
-5. ADJUSTMENT_SOURCE — markers: "Отчёт о выполнении согласованных процедур", "Служебная записка казначейства"
-6. KYC — markers: "Знай своего клиента", "НАДЛЕЖАЩАЯ ПРОВЕРКА КЛИЕНТА"
-7. AUDIT_PLANNING — markers: "Внешний аудит — Записка о планировании"
+Assign exactly one doc_type by checking markers in this strict order (first match wins).
+Match markers case-insensitively in Russian or English:
+1. SUPERSEDED_DRAFT — "ЗАМЕНЕНА ОКОНЧАТЕЛЬНЫМ", "ПРОЕКТ", "не может служить основанием",
+   "SUPERSEDED BY FINAL", "DRAFT", "NOT TO BE RELIED UPON"
+2. LOAN_SUPERSEDED — "НЕ ПРИМЕНЯЕТСЯ", "НЕДЕЙСТВУЮЩАЯ РЕДАКЦИЯ",
+   "SUPERSEDED", "NOT APPLICABLE", "PRIOR VERSION", "NO LONGER IN FORCE"
+3. LOAN — "ИСПОЛНИТЕЛЬНЫЙ ЭКЗЕМПЛЯР", "Старший обеспеченный заём",
+   "EXECUTION COPY", "SENIOR SECURED LOAN", "CONFIDENTIAL · EXECUTION"
+4. AUDIT_NOTES — "АУДИТОРСКОЕ ДЕЛО", "Примечания к финансовой отчётности",
+   "NOTES TO THE FINANCIAL STATEMENTS", "AUDIT FILE"
+5. ADJUSTMENT_SOURCE — "Отчёт о выполнении согласованных процедур", "Служебная записка казначейства",
+   "AGREED-UPON PROCEDURES", "TREASURY MEMORANDUM"
+6. KYC — "Знай своего клиента", "НАДЛЕЖАЩАЯ ПРОВЕРКА КЛИЕНТА",
+   "KNOW YOUR CUSTOMER", "KYC", "CUSTOMER DUE DILIGENCE"
+7. AUDIT_PLANNING — "Внешний аудит — Записка о планировании",
+   "EXTERNAL AUDIT — PLANNING", "PLANNING MEMORANDUM"
 8. NOISE — when none of the above markers appear on the page
 
-Also list every ACC- account id visible on the page (for example from a header line "Счёт ACC-....").
+Also list every ACC- account id visible on the page (for example from a header line "Счёт ACC-...."
+or "Account ACC-....").
 Return marker_quote as verbatim text from the image that supports the chosen doc_type.
 """
 
@@ -69,6 +121,15 @@ def _classify_text(text: str) -> str:
         if pattern.search(text):
             return doc_type
     return "NOISE"
+
+
+def first_nonempty_line(pages: list[str]) -> str:
+    for page in pages:
+        for line in page.splitlines():
+            stripped = line.strip()
+            if stripped:
+                return stripped
+    return ""
 
 
 def _extract_acc_ids(text: str) -> list[str]:
@@ -214,22 +275,22 @@ async def _run_async(*, work_dir: Path) -> StageResult:
                 )
                 conflicts.extend(digit_mismatches)
                 doc_type = extracted.doc_type if extracted.doc_type in VALID_DOC_TYPES else "NOISE"
-            record = classified[doc_id]
-            previous_type = record["doc_type"]
-            if previous_type != doc_type:
-                pdf_counts[previous_type] -= 1
-                pdf_counts[doc_type] += 1
-                record["doc_type"] = doc_type
-                if doc_type == "AUDIT_PLANNING":
-                    record["exclude_from_extraction"] = True
-                elif "exclude_from_extraction" in record:
-                    del record["exclude_from_extraction"]
-            vision_acc_ids = _normalize_acc_ids(extracted.acc_ids)
-            if vision_acc_ids:
-                record["acc_ids"] = vision_acc_ids
-                record["unbound"] = False
-            record["vision_classified"] = True
-            record["vision_marker_quote"] = extracted.marker_quote
+                record = classified[doc_id]
+                previous_type = record["doc_type"]
+                if previous_type != doc_type:
+                    pdf_counts[previous_type] -= 1
+                    pdf_counts[doc_type] += 1
+                    record["doc_type"] = doc_type
+                    if doc_type == "AUDIT_PLANNING":
+                        record["exclude_from_extraction"] = True
+                    elif "exclude_from_extraction" in record:
+                        del record["exclude_from_extraction"]
+                vision_acc_ids = _normalize_acc_ids(extracted.acc_ids)
+                if vision_acc_ids:
+                    record["acc_ids"] = vision_acc_ids
+                    record["unbound"] = False
+                record["vision_classified"] = True
+                record["vision_marker_quote"] = extracted.marker_quote
 
     pdf_total = sum(pdf_counts.values())
     _print_summary_table(pdf_counts, pdf_total=pdf_total)

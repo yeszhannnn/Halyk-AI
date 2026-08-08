@@ -19,7 +19,10 @@ from agent.parsing.numbers import capture_absent_values
 from agent.shape import is_canonical_open_dataset
 from agent.stages import StageResult
 
-HEADER_ACCOUNT_PATTERN = re.compile(r"Сч[её]т\s+(ACC-\d+)", re.IGNORECASE)
+HEADER_ACCOUNT_PATTERN = re.compile(
+    r"(?:Сч[её]т|Account)\s+(ACC-\d+)",
+    re.IGNORECASE,
+)
 LEGAL_SUFFIX_PATTERN = re.compile(
     r"[\s,.\-]*(?:l(?:\.[\s]*){2}p|l\.?\s*l\.?\s*p\.?|j\.?\s*s\.?\s*c\.?|gmbh)\.?\s*$",
     re.IGNORECASE,
@@ -27,6 +30,7 @@ LEGAL_SUFFIX_PATTERN = re.compile(
 SPARSE_PAGE_TEXT_THRESHOLD = 100
 OCR_RENDER_DPI = 150
 EXTRACTOR = "s4b_parties"
+EXTRACTION_FAILED = "EXTRACTION_FAILED"
 TEXT_CONFIDENCE = Decimal("0.95")
 TEXT_UNVERIFIED_CONFIDENCE = Decimal("0.70")
 OCR_CONFIDENCE = Decimal("0.60")
@@ -39,7 +43,8 @@ SYSTEM_PROMPT = """You extract KYC ownership/perimeter data from Russian/English
 
 Rules:
 - Return only information explicitly visible in the provided dossier text or images.
-- header_account must be the account id from the dossier header line beginning with "Счёт ACC-...".
+- header_account must be the account id from the dossier header line beginning with "Счёт ACC-..."
+  or "Account ACC-...".
 - ownership_rows must list every row from the table beneath the header with counterparty name and percentage.
 - table_semantics must be one of:
   - RELATED_PARTY: the rule sentence defines related parties; organisations at or above threshold_pct
@@ -591,16 +596,28 @@ async def _run_async(work_dir: Path) -> StageResult:
     candidates = _discover_kyc_candidates(inventory, classified)
     scenario_bindings: dict[str, str] = {}
     pre_extracted: dict[str, KycPartiesExtract] = {}
+    extraction_failed_count = 0
 
     async with LLMClient() as client:
         for doc_id, doc in candidates:
-            scenario_id, ocr_extract = await _resolve_scenario_for_dossier(
-                client,
-                work_dir=work_dir,
-                doc_id=doc_id,
-                doc=doc,
-                account_to_scenario=account_to_scenario,
-            )
+            try:
+                scenario_id, ocr_extract = await _resolve_scenario_for_dossier(
+                    client,
+                    work_dir=work_dir,
+                    doc_id=doc_id,
+                    doc=doc,
+                    account_to_scenario=account_to_scenario,
+                )
+            except Exception as exc:
+                conflicts.append(
+                    {
+                        "kind": EXTRACTION_FAILED,
+                        "doc_id": doc_id,
+                        "message": str(exc),
+                    },
+                )
+                extraction_failed_count += 1
+                continue
             if scenario_id is None:
                 if doc.get("ocr_pages") and ocr_extract is not None:
                     conflicts.append(
@@ -663,16 +680,28 @@ async def _run_async(work_dir: Path) -> StageResult:
                 perimeter = None
                 digit_mismatches: list[dict[str, Any]] = []
             else:
-                with capture_absent_values() as absent_fields:
-                    extracted, verification, source_kind, review_fields, perimeter, digit_mismatches = (
-                        await _extract_dossier(
-                            client,
-                            work_dir=work_dir,
-                            scenario_id=scenario_id,
-                            doc_id=doc_id,
-                            doc=doc,
+                try:
+                    with capture_absent_values() as absent_fields:
+                        extracted, verification, source_kind, review_fields, perimeter, digit_mismatches = (
+                            await _extract_dossier(
+                                client,
+                                work_dir=work_dir,
+                                scenario_id=scenario_id,
+                                doc_id=doc_id,
+                                doc=doc,
+                            )
                         )
+                except Exception as exc:
+                    conflicts.append(
+                        {
+                            "kind": EXTRACTION_FAILED,
+                            "scenario_id": scenario_id,
+                            "doc_id": doc_id,
+                            "message": str(exc),
+                        },
                     )
+                    extraction_failed_count += 1
+                    continue
                 for field_name in absent_fields:
                     conflicts.append(
                         {
@@ -795,6 +824,7 @@ async def _run_async(work_dir: Path) -> StageResult:
             "scenario_count": len(scenario_payloads),
             "related_party_rows": sum(len(item["ownership"]) for item in scenario_payloads.values()),
             "review_count": len(review),
+            "extraction_failed_count": extraction_failed_count,
         },
     }
 
@@ -810,7 +840,7 @@ async def _run_async(work_dir: Path) -> StageResult:
 
     print(
         f"s4b_parties: scenarios={len(scenario_payloads)} "
-        f"conflicts={len(conflicts)}",
+        f"conflicts={len(conflicts)} extraction_failed={extraction_failed_count}",
     )
 
     return StageResult(item_count=len(scenario_payloads), row_count=len(scenario_payloads))

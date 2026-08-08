@@ -208,3 +208,35 @@ async def test_transport_retries_at_least_five_times_on_429() -> None:
 
     assert attempts["count"] == MAX_REQUEST_ATTEMPTS
     assert exc_info.value.attempts == MAX_REQUEST_ATTEMPTS
+
+
+@pytest.mark.asyncio
+async def test_unknown_exception_retries_before_exhausting() -> None:
+    from agent.llm.client import LLMClient, MAX_REQUEST_ATTEMPTS
+
+    attempts = {"count": 0}
+
+    async def flaky_create(**_kwargs: object) -> tuple[object, object]:
+        attempts["count"] += 1
+        raise RuntimeError("truncated tool call")
+
+    client = LLMClient(semaphore=asyncio.Semaphore(1))
+    client._client.create_with_completion = AsyncMock(side_effect=flaky_create)  # type: ignore[method-assign]
+
+    with patch("agent.llm.client.get_token_bucket") as bucket_mock:
+        bucket_mock.return_value.acquire = AsyncMock()
+        with patch("agent.llm.client._sleep_with_backoff", new=AsyncMock()):
+            with pytest.raises(LLMTransportExhaustedError) as exc_info:
+                from pydantic import BaseModel
+
+                class Probe(BaseModel):
+                    answer: str
+
+                await client._request_with_retries(
+                    response_model=Probe,
+                    messages=[{"role": "user", "content": "probe"}],
+                    request_params={},
+                )
+
+    assert attempts["count"] == MAX_REQUEST_ATTEMPTS
+    assert exc_info.value.attempts == MAX_REQUEST_ATTEMPTS

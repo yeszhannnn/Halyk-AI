@@ -11,6 +11,8 @@ from agent.parsing.categories import derive_leg_sign
 from agent.parsing.numbers import normalize_decimal, normalize_optional_decimal
 
 LEDGER_CATEGORIES_CONTEXT_KEY = "ledger_categories"
+DERIVED_LEG_SHAPES = frozenset({"EBITDA", "ADJUSTED_EBITDA"})
+_DIRECTION_KINDS = frozenset({"MAX", "MIN"})
 
 RELATED_PARTY_MARKERS = (
     "связан",
@@ -89,6 +91,7 @@ class CategorySpecExtract(BaseModel):
         ),
     )
     include_keywords_quote: str = Field(
+        default="",
         description="Verbatim quote from the clause naming included categories or keywords.",
     )
     exclude_keywords: list[str] = Field(
@@ -100,9 +103,11 @@ class CategorySpecExtract(BaseModel):
         description="Verbatim quote for exclusions, or empty string if none stated.",
     )
     apply_reclass: bool = Field(
+        default=True,
         description="Whether auditor reclassifications apply to this category leg.",
     )
     apply_reclass_quote: str = Field(
+        default="",
         description="Verbatim quote about auditor reclassifications for this leg.",
     )
 
@@ -111,7 +116,10 @@ class CategorySpecExtract(BaseModel):
         if _text_refers_to_related_parties(self.include_keywords_quote):
             return self
         if not self.include_keywords:
-            raise ValueError("include_keywords must contain at least one ledger category")
+            raise ValueError("include_keywords must contain at least one ledger category or derived shape")
+        normalized = {str(keyword).upper() for keyword in self.include_keywords}
+        if normalized <= DERIVED_LEG_SHAPES:
+            return self
         return self
 
     @field_validator("include_keywords")
@@ -129,11 +137,22 @@ class CategorySpecExtract(BaseModel):
         if not value:
             return value
         allowed_set = {str(category) for category in allowed}
-        invalid = sorted({str(keyword) for keyword in value if str(keyword) not in allowed_set})
+        normalized = {str(keyword).upper() for keyword in value}
+        if normalized <= DERIVED_LEG_SHAPES:
+            return [keyword.upper() if str(keyword).upper() in DERIVED_LEG_SHAPES else str(keyword) for keyword in value]
+        invalid = sorted(
+            {
+                str(keyword)
+                for keyword in value
+                if str(keyword) not in allowed_set
+                and str(keyword).upper() not in DERIVED_LEG_SHAPES
+            },
+        )
         if invalid:
             raise ValueError(
                 "include_keywords must be chosen from the ledger category list "
-                f"{sorted(allowed_set)}; invalid: {invalid}",
+                f"{sorted(allowed_set)} plus derived shapes {sorted(DERIVED_LEG_SHAPES)}; "
+                f"invalid: {invalid}",
             )
         return value
 
@@ -143,6 +162,7 @@ class MetricSpecExtract(BaseModel):
         description="RATIO for quotient metrics; SUM for summed USD caps; COUNT for counted metrics.",
     )
     kind_quote: str = Field(
+        default="",
         description="Verbatim quote showing ratio, sum, or count computation.",
     )
     numerator: CategorySpecExtract | None = Field(
@@ -158,9 +178,11 @@ class MetricSpecExtract(BaseModel):
         description="Aggregate category when kind is SUM or COUNT.",
     )
     scope: MetricScope = Field(
+        default=MetricScope.BORROWER,
         description="BORROWER if only borrower financials; GROUP if consolidated group scope.",
     )
     scope_quote: str = Field(
+        default="",
         description="Verbatim quote stating borrower-only or group/consolidated scope.",
     )
     notes: str = Field(
@@ -186,13 +208,17 @@ class MetricSpecExtract(BaseModel):
             return data
         data = dict(data)
         kind = data.get("kind")
-        if kind is None or (isinstance(kind, str) and not kind.strip()):
+        if kind is not None and isinstance(kind, str):
+            kind = _uppercase_str(kind.strip())
+            if kind in _DIRECTION_KINDS:
+                kind = None
+        if kind is None or (isinstance(kind, str) and not str(kind).strip()):
             if data.get("denominator") is not None:
                 data["kind"] = "RATIO"
             else:
                 data["kind"] = "SUM"
         else:
-            data["kind"] = _uppercase_str(kind)
+            data["kind"] = kind
         kind = data["kind"]
         if kind in {"SUM", "COUNT"} and data.get("category") is None and data.get("numerator") is not None:
             data["category"] = data["numerator"]
@@ -238,7 +264,11 @@ class SpringingConditionExtract(BaseModel):
 def _infer_metric_kind(metric: dict[str, Any], covenant_data: dict[str, Any]) -> str:
     kind = metric.get("kind")
     if kind is not None and str(kind).strip():
-        return str(_uppercase_str(kind))
+        normalized = str(_uppercase_str(kind))
+        if normalized in _DIRECTION_KINDS:
+            kind = None
+        else:
+            return normalized
     unit = covenant_data.get("threshold_unit")
     if unit is not None and str(unit).strip():
         normalized_unit = str(_uppercase_str(unit))
@@ -290,9 +320,11 @@ class CovenantExtractBase(BaseModel):
     )
     metric: MetricSpecExtract
     notes: str = Field(
+        default="",
         description="Full verbatim formulation of how the metric is computed.",
     )
     notes_quote: str = Field(
+        default="",
         description="Verbatim quote backing the metric definition (may match notes).",
     )
     period_start: date
@@ -433,9 +465,11 @@ class CovenantMetricExtract(BaseModel):
 
     metric: MetricSpecExtract
     notes: str = Field(
+        default="",
         description="Full verbatim formulation of how the metric is computed.",
     )
     notes_quote: str = Field(
+        default="",
         description="Verbatim quote backing the metric definition (may match notes).",
     )
 

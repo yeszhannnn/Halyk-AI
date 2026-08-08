@@ -180,6 +180,10 @@ def _computation_block(
     )
     off_ledger = _off_ledger_amount(covenant, adjustments)
     threshold = _d(covenant["threshold"])
+    direction = covenant["direction"]
+    status_from_evaluated = (
+        "BREACH" if breaches(evaluated, direction, threshold) else "COMPLIANT"
+    )
     return {
         "expression": _metric_expression(covenant),
         "ledger_component": str(ledger_component),
@@ -187,7 +191,14 @@ def _computation_block(
         "off_ledger_added": str(off_ledger),
         "evaluated": str(evaluated),
         "rounded": str(rounded),
-        "comparison": _format_comparison(evaluated, threshold, covenant["direction"], status),
+        "comparison": _format_comparison(evaluated, threshold, direction, status),
+        "status_from_evaluated": status_from_evaluated,
+        "comparison_from_evaluated": _format_comparison(
+            evaluated,
+            threshold,
+            direction,
+            status_from_evaluated,
+        ),
     }
 
 
@@ -476,8 +487,30 @@ def _page_text(inventory: dict[str, Any], doc_ref: str, page: int) -> str:
     return pages[page - 1]
 
 
-def verify(trace: dict[str, Any], *, work_dir: Path, template: dict[str, Any]) -> None:
-    """Run the seven TRACE_SPEC section-4 checks; raise on failure."""
+def _verification_conflict(
+    *,
+    check: str,
+    message: str,
+    scenario_id: str | None = None,
+    slot: str | None = None,
+    **extra: Any,
+) -> dict[str, Any]:
+    conflict: dict[str, Any] = {
+        "kind": "TRACE_VERIFY_FAILED",
+        "check": check,
+        "message": message,
+    }
+    if scenario_id is not None:
+        conflict["scenario_id"] = scenario_id
+    if slot is not None:
+        conflict["slot"] = slot
+    conflict.update(extra)
+    return conflict
+
+
+def verify(trace: dict[str, Any], *, work_dir: Path, template: dict[str, Any]) -> list[dict[str, Any]]:
+    """Run the seven TRACE_SPEC section-4 checks; record conflicts and continue."""
+    conflicts: list[dict[str, Any]] = []
     inventory = _load_json(work_dir / "01_inventory.json")
     adjustments = trace.get("adjustments") or {}
     ledger = _ledger_rows(work_dir)
@@ -486,11 +519,20 @@ def verify(trace: dict[str, Any], *, work_dir: Path, template: dict[str, Any]) -
     expected_cells = _template_cell_count(template)
     actual_cells = len(trace.get("cells") or [])
     if actual_cells != expected_cells:
-        raise ValueError(
-            f"trace cell count {actual_cells} != template cell count {expected_cells}",
+        conflicts.append(
+            _verification_conflict(
+                check="cell_count",
+                message=(
+                    f"trace cell count {actual_cells} != template cell count {expected_cells}"
+                ),
+                expected_cells=expected_cells,
+                actual_cells=actual_cells,
+            ),
         )
 
     for cell in trace.get("cells") or []:
+        scenario_id = str(cell["scenario_id"])
+        slot = str(cell["slot"])
         covenant = cell.get("covenant") or {}
         for quote_holder in (covenant.get("source"), (covenant.get("springing") or {}).get("source")):
             if not quote_holder:
@@ -502,8 +544,14 @@ def verify(trace: dict[str, Any], *, work_dir: Path, template: dict[str, Any]) -
             )
             quote = str(quote_holder.get("quote", ""))
             if quote and not verify_quote(quote, page_text):
-                raise ValueError(
-                    f"quote not found on page for {cell['scenario_id']} {cell['slot']}: {quote!r}",
+                conflicts.append(
+                    _verification_conflict(
+                        check="quote_on_page",
+                        scenario_id=scenario_id,
+                        slot=slot,
+                        message=f"quote not found on page: {quote!r}",
+                        quote=quote,
+                    ),
                 )
 
         computation = cell.get("computation") or {}
@@ -511,35 +559,102 @@ def verify(trace: dict[str, Any], *, work_dir: Path, template: dict[str, Any]) -
         rounded = _d(computation.get("rounded"))
         expected_rounded = round_half_up(abs(evaluated), 2)
         if rounded != expected_rounded:
-            raise ValueError(
-                f"rounded mismatch for {cell['scenario_id']} {cell['slot']}: "
-                f"{rounded} != {expected_rounded}",
+            conflicts.append(
+                _verification_conflict(
+                    check="rounded_matches_evaluated",
+                    scenario_id=scenario_id,
+                    slot=slot,
+                    message=f"rounded mismatch: {rounded} != {expected_rounded}",
+                    evaluated=str(evaluated),
+                    rounded=str(rounded),
+                    expected_rounded=str(expected_rounded),
+                ),
             )
 
         threshold = _d(covenant.get("threshold"))
         direction = covenant.get("direction", "MAX")
         status = cell.get("status")
         strategy = cell.get("strategy", "computed")
+        status_from_evaluated = computation.get("status_from_evaluated")
+        if status_from_evaluated is None:
+            status_from_evaluated = (
+                "BREACH" if breaches(evaluated, direction, threshold) else "COMPLIANT"
+            )
+        comparison = str(computation.get("comparison", ""))
+        comparison_from_evaluated = str(
+            computation.get("comparison_from_evaluated", ""),
+        )
         if strategy in {"computed", "springing_not_triggered"}:
-            expected_status = "BREACH" if breaches(evaluated, direction, threshold) else "COMPLIANT"
-            if status != expected_status:
-                raise ValueError(
-                    f"comparison/status mismatch for {cell['scenario_id']} {cell['slot']}: "
-                    f"status={status} expected={expected_status}",
+            if status != status_from_evaluated:
+                conflicts.append(
+                    _verification_conflict(
+                        check="status_matches_evaluated",
+                        scenario_id=scenario_id,
+                        slot=slot,
+                        message=(
+                            f"status {status} disagrees with evaluated value "
+                            f"(expected {status_from_evaluated})"
+                        ),
+                        status=status,
+                        status_from_evaluated=status_from_evaluated,
+                        evaluated=str(evaluated),
+                        rounded=str(rounded),
+                        threshold=str(threshold),
+                        direction=direction,
+                        strategy=strategy,
+                        comparison=comparison,
+                        comparison_from_evaluated=comparison_from_evaluated,
+                        flags=cell.get("flags") or [],
+                    ),
                 )
 
-            comparison = str(computation.get("comparison", ""))
             if status not in comparison:
-                raise ValueError(
-                    f"comparison string missing status for {cell['scenario_id']} {cell['slot']}",
+                conflicts.append(
+                    _verification_conflict(
+                        check="comparison_contains_status",
+                        scenario_id=scenario_id,
+                        slot=slot,
+                        message=f"comparison string missing recorded status {status!r}",
+                        status=status,
+                        comparison=comparison,
+                    ),
+                )
+            if status_from_evaluated not in comparison_from_evaluated:
+                conflicts.append(
+                    _verification_conflict(
+                        check="comparison_from_evaluated_contains_status",
+                        scenario_id=scenario_id,
+                        slot=slot,
+                        message=(
+                            "comparison_from_evaluated missing evaluated status "
+                            f"{status_from_evaluated!r}"
+                        ),
+                        status_from_evaluated=status_from_evaluated,
+                        comparison_from_evaluated=comparison_from_evaluated,
+                    ),
                 )
 
         evidence = cell.get("evidence_txn_id")
         if evidence is not None and str(evidence) not in ledger_txn_ids:
-            raise ValueError(f"evidence_txn_id not in ledger: {evidence}")
+            conflicts.append(
+                _verification_conflict(
+                    check="evidence_in_ledger",
+                    scenario_id=scenario_id,
+                    slot=slot,
+                    message=f"evidence_txn_id not in ledger: {evidence}",
+                    evidence_txn_id=str(evidence),
+                ),
+            )
         if evidence and status != "BREACH":
-            raise ValueError(
-                f"non-null evidence on COMPLIANT cell {cell['scenario_id']} {cell['slot']}",
+            conflicts.append(
+                _verification_conflict(
+                    check="evidence_requires_breach",
+                    scenario_id=scenario_id,
+                    slot=slot,
+                    message="non-null evidence on COMPLIANT cell",
+                    status=status,
+                    evidence_txn_id=str(evidence),
+                ),
             )
 
         for adj_id in computation.get("adjustments_applied") or []:
@@ -548,7 +663,17 @@ def verify(trace: dict[str, Any], *, work_dir: Path, template: dict[str, Any]) -
             if adj_id not in adjustments and adj_id not in (
                 trace.get("adjustments") or {}
             ):
-                raise ValueError(f"unknown adjustment in trace: {adj_id}")
+                conflicts.append(
+                    _verification_conflict(
+                        check="adjustment_resolves",
+                        scenario_id=scenario_id,
+                        slot=slot,
+                        message=f"unknown adjustment in trace: {adj_id}",
+                        adjustment_id=str(adj_id),
+                    ),
+                )
+
+    return conflicts
 
 
 def project(trace: dict[str, Any], template: dict[str, Any]) -> dict[str, Any]:

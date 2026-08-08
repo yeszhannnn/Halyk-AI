@@ -103,9 +103,14 @@ def _log_stage(stage_name: str, elapsed_ms: int, result: StageResult) -> None:
         if result.retry_clause_count is not None
         else ""
     )
+    verify_part = (
+        f" verify_failed={result.verification_failed_count}"
+        if result.verification_failed_count is not None
+        else ""
+    )
     print(
         f"{stage_name}: {elapsed_ms}ms items={result.item_count}"
-        f"{row_part}{unstable_part}{retry_part}",
+        f"{row_part}{unstable_part}{retry_part}{verify_part}",
     )
 
 

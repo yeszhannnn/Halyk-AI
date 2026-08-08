@@ -20,14 +20,18 @@ from agent.shape import is_canonical_open_dataset
 from agent.stages import StageResult
 from agent.stages.s4b_parties import normalize_counterparty
 
-COVENANT_SUPPLEMENT_HEADING = "ДОПОЛНЕНИЕ О СОБЛЮДЕНИИ КОВЕНАНТОВ"
+COVENANT_SUPPLEMENT_HEADINGS = (
+    "ДОПОЛНЕНИЕ О СОБЛЮДЕНИИ КОВЕНАНТОВ",
+    "COVENANT COMPLIANCE SUPPLEMENT",
+)
 MARKER_PATTERN = re.compile(r"\((\d+(?:\.\d+)?)\)")
 NOTE_HEADING_PATTERN = re.compile(
-    r"Примечание\s+(\d+)\s*[—–-]\s*([^\n]+)",
+    r"(?:Примечание|Note)\s+(\d+)\s*[—–-]\s*([^\n]+)",
     re.IGNORECASE,
 )
 TXN_ID_PATTERN = re.compile(r"TXN-[A-Z]\d+-\d+", re.IGNORECASE)
 EXTRACTOR = "s4c_adjustments"
+EXTRACTION_FAILED = "EXTRACTION_FAILED"
 TEXT_CONFIDENCE = Decimal("0.95")
 TEXT_UNVERIFIED_CONFIDENCE = Decimal("0.70")
 OCR_CONFIDENCE = Decimal("0.60")
@@ -62,7 +66,8 @@ Rules:
 
 VISION_PROMPT = """Extract every covenant adjustment visible on these scanned audit-note page images.
 
-Look especially for EBITDA add-back tables under "Корректировки EBITDA" with a materiality threshold.
+Look especially for EBITDA add-back tables under "Корректировки EBITDA" or "EBITDA Adjustments"
+with a materiality threshold.
 Return every table row, including items below the materiality floor. Python applies the floor later.
 Return each distinct adjustment as a separate item using the same kind taxonomy as text segments.
 """
@@ -134,8 +139,11 @@ def _ocr_page_image_paths(
 
 def _covenant_section(pages: list[str]) -> str:
     text = "\n".join(pages)
-    if COVENANT_SUPPLEMENT_HEADING in text:
-        return text[text.index(COVENANT_SUPPLEMENT_HEADING) :]
+    normalized = text.casefold()
+    for heading in COVENANT_SUPPLEMENT_HEADINGS:
+        needle = heading.casefold()
+        if needle in normalized:
+            return text[normalized.index(needle) :]
     return text
 
 
@@ -673,79 +681,29 @@ async def _run_async(work_dir: Path) -> StageResult:
     review: list[dict[str, Any]] = []
     unrecognised: list[dict[str, Any]] = []
     adjustments: dict[str, dict[str, Any]] = {}
+    extraction_failed_count = 0
 
     async with LLMClient() as client:
         for scenario_id, doc_id, source_kind in _discover_sources(classified, bound):
-            doc = inventory["documents"][doc_id]
-            pages = doc["pages"]
-            if source_kind == "audit_notes":
-                section = _covenant_section(pages)
-            else:
-                section = "\n".join(pages)
+            try:
+                doc = inventory["documents"][doc_id]
+                pages = doc["pages"]
+                if source_kind == "audit_notes":
+                    section = _covenant_section(pages)
+                else:
+                    section = "\n".join(pages)
 
-            segments = _segment_numbered_items(section)
-            for segment in segments:
-                marker = segment["marker"]
-                adjustment_id = _adjustment_id(scenario_id, marker)
-                with capture_absent_values() as absent_fields:
-                    extracted, verification, segment_source_kind = await _classify_segment(
-                        client,
-                        scenario_id=scenario_id,
-                        doc_id=doc_id,
-                        marker=marker,
-                        segment_text=segment["text"],
-                        pages=pages,
-                    )
-                for field_name in absent_fields:
-                    conflicts.append(
-                        {
-                            "kind": "ABSENT_VALUE",
-                            "field": field_name,
-                            "scenario_id": scenario_id,
-                            "doc_id": doc_id,
-                            "marker": marker,
-                        },
-                    )
-                if extracted.kind.strip().upper() == "UNRECOGNISED":
-                    unrecognised.append(
-                        {
-                            "scenario_id": scenario_id,
-                            "doc_id": doc_id,
-                            "marker": marker,
-                            "text": segment["text"],
-                            "source_kind": segment_source_kind,
-                        },
-                    )
-                    continue
-
-                serialized = _serialize_adjustment(
-                    adjustment_id=adjustment_id,
-                    scenario_id=scenario_id,
-                    extracted=extracted,
-                    doc_id=doc_id,
-                    pages=pages,
-                    marker=marker,
-                    source_kind=segment_source_kind,
-                    verification=verification,
-                    ledger=ledger,
-                    conflicts=conflicts,
-                )
-                if serialized is not None:
-                    adjustments[adjustment_id] = serialized
-
-            ocr_pages = doc.get("ocr_pages") or []
-            if ocr_pages:
-                page_paths = _ocr_page_image_paths(work_dir, doc_id, doc, ocr_pages)
-                if page_paths:
-                    page_numbers = [page for page, _ in page_paths]
-                    image_paths = [path for _, path in page_paths]
+                segments = _segment_numbered_items(section)
+                for segment in segments:
+                    marker = segment["marker"]
+                    adjustment_id = _adjustment_id(scenario_id, marker)
                     with capture_absent_values() as absent_fields:
-                        vision_items, vision_source_kind, vision_unstable = await _classify_vision_pages(
+                        extracted, verification, segment_source_kind = await _classify_segment(
                             client,
                             scenario_id=scenario_id,
                             doc_id=doc_id,
-                            page_numbers=page_numbers,
-                            image_paths=image_paths,
+                            marker=marker,
+                            segment_text=segment["text"],
                             pages=pages,
                         )
                     for field_name in absent_fields:
@@ -755,43 +713,106 @@ async def _run_async(work_dir: Path) -> StageResult:
                                 "field": field_name,
                                 "scenario_id": scenario_id,
                                 "doc_id": doc_id,
+                                "marker": marker,
                             },
                         )
-                    review.extend(vision_unstable)
-                    conflicts.extend(vision_unstable)
-                    for index, item in enumerate(vision_items, start=1):
-                        page = page_numbers[min(index - 1, len(page_numbers) - 1)]
-                        adjustment_id = _vision_adjustment_id(scenario_id, page, index)
-                        if item.kind.strip().upper() == "UNRECOGNISED":
-                            unrecognised.append(
+                    if extracted.kind.strip().upper() == "UNRECOGNISED":
+                        unrecognised.append(
+                            {
+                                "scenario_id": scenario_id,
+                                "doc_id": doc_id,
+                                "marker": marker,
+                                "text": segment["text"],
+                                "source_kind": segment_source_kind,
+                            },
+                        )
+                        continue
+
+                    serialized = _serialize_adjustment(
+                        adjustment_id=adjustment_id,
+                        scenario_id=scenario_id,
+                        extracted=extracted,
+                        doc_id=doc_id,
+                        pages=pages,
+                        marker=marker,
+                        source_kind=segment_source_kind,
+                        verification=verification,
+                        ledger=ledger,
+                        conflicts=conflicts,
+                    )
+                    if serialized is not None:
+                        adjustments[adjustment_id] = serialized
+
+                ocr_pages = doc.get("ocr_pages") or []
+                if ocr_pages:
+                    page_paths = _ocr_page_image_paths(work_dir, doc_id, doc, ocr_pages)
+                    if page_paths:
+                        page_numbers = [page for page, _ in page_paths]
+                        image_paths = [path for _, path in page_paths]
+                        with capture_absent_values() as absent_fields:
+                            vision_items, vision_source_kind, vision_unstable = await _classify_vision_pages(
+                                client,
+                                scenario_id=scenario_id,
+                                doc_id=doc_id,
+                                page_numbers=page_numbers,
+                                image_paths=image_paths,
+                                pages=pages,
+                            )
+                        for field_name in absent_fields:
+                            conflicts.append(
                                 {
+                                    "kind": "ABSENT_VALUE",
+                                    "field": field_name,
                                     "scenario_id": scenario_id,
                                     "doc_id": doc_id,
-                                    "page": page,
-                                    "source_kind": vision_source_kind,
-                                    "kind_quote": item.kind_quote,
                                 },
                             )
-                            continue
+                        review.extend(vision_unstable)
+                        conflicts.extend(vision_unstable)
+                        for index, item in enumerate(vision_items, start=1):
+                            page = page_numbers[min(index - 1, len(page_numbers) - 1)]
+                            adjustment_id = _vision_adjustment_id(scenario_id, page, index)
+                            if item.kind.strip().upper() == "UNRECOGNISED":
+                                unrecognised.append(
+                                    {
+                                        "scenario_id": scenario_id,
+                                        "doc_id": doc_id,
+                                        "page": page,
+                                        "source_kind": vision_source_kind,
+                                        "kind_quote": item.kind_quote,
+                                    },
+                                )
+                                continue
 
-                        verification = {field: False for field in ("kind",)}
-                        serialized = _serialize_adjustment(
-                            adjustment_id=adjustment_id,
-                            scenario_id=scenario_id,
-                            extracted=item,
-                            doc_id=doc_id,
-                            pages=pages,
-                            marker=f"ocr_p{page}_{index}",
-                            source_kind=vision_source_kind,
-                            verification=verification,
-                            ledger=ledger,
-                            conflicts=conflicts,
-                        )
-                        if serialized is None:
-                            continue
-                        existing = adjustments.get(adjustment_id)
-                        if existing is None:
-                            adjustments[adjustment_id] = serialized
+                            verification = {field: False for field in ("kind",)}
+                            serialized = _serialize_adjustment(
+                                adjustment_id=adjustment_id,
+                                scenario_id=scenario_id,
+                                extracted=item,
+                                doc_id=doc_id,
+                                pages=pages,
+                                marker=f"ocr_p{page}_{index}",
+                                source_kind=vision_source_kind,
+                                verification=verification,
+                                ledger=ledger,
+                                conflicts=conflicts,
+                            )
+                            if serialized is None:
+                                continue
+                            existing = adjustments.get(adjustment_id)
+                            if existing is None:
+                                adjustments[adjustment_id] = serialized
+            except Exception as exc:
+                conflicts.append(
+                    {
+                        "kind": EXTRACTION_FAILED,
+                        "scenario_id": scenario_id,
+                        "doc_id": doc_id,
+                        "message": str(exc),
+                    },
+                )
+                extraction_failed_count += 1
+                continue
 
     deduped: dict[str, dict[str, Any]] = {}
     seen_keys: set[tuple[Any, ...]] = set()
@@ -819,6 +840,7 @@ async def _run_async(work_dir: Path) -> StageResult:
             "conflict_count": len(conflicts),
             "review_count": len(review),
             "unstable_field_count": unstable_field_count,
+            "extraction_failed_count": extraction_failed_count,
         },
     }
 
@@ -836,7 +858,7 @@ async def _run_async(work_dir: Path) -> StageResult:
     print(
         f"s4c_adjustments: adjustments={len(deduped)} "
         f"unrecognised={len(unrecognised)} conflicts={len(conflicts)} review={len(review)} "
-        f"unstable_fields={unstable_field_count}",
+        f"unstable_fields={unstable_field_count} extraction_failed={extraction_failed_count}",
     )
 
     return StageResult(

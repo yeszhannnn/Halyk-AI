@@ -449,6 +449,20 @@ def _is_validation_error(exc: Exception) -> bool:
     ) is not None
 
 
+def _classify_request_failure(exc: Exception) -> tuple[bool, str, int]:
+    """Return whether to retry, error kind, and max attempts for this failure."""
+    if isinstance(exc, BudgetExceededError):
+        return False, "budget", 1
+    validation_error = _is_validation_error(exc)
+    if validation_error:
+        sentinel_error = exception_mentions_absent_sentinel(exc)
+        max_attempts = 2 if sentinel_error else MAX_REQUEST_ATTEMPTS
+        return True, "validation", max_attempts
+    if _is_transport_error(exc) or _is_rate_limited(exc):
+        return True, "transport", MAX_REQUEST_ATTEMPTS
+    return True, "unknown", MAX_REQUEST_ATTEMPTS
+
+
 def _format_validation_failure(exc: Exception) -> tuple[str, Any]:
     root = _root_cause(exc)
     if isinstance(root, PydanticValidationError):
@@ -535,31 +549,28 @@ class LLMClient:
                 raise
             except Exception as exc:
                 last_exc = exc
-                validation_error = _is_validation_error(exc)
-                transport_error = _is_transport_error(exc) or _is_rate_limited(exc)
-                retryable = validation_error or transport_error
-                # Retrying an absence sentinel never changes the answer: allow one retry.
-                sentinel_error = validation_error and exception_mentions_absent_sentinel(exc)
-                max_attempts = 2 if sentinel_error else MAX_REQUEST_ATTEMPTS
+                retryable, error_kind, max_attempts = _classify_request_failure(exc)
+                root = _root_cause(exc)
+                logger.warning(
+                    "LLM attempt %d/%d failed (%s): %s: %s",
+                    attempt,
+                    max_attempts,
+                    error_kind,
+                    type(root).__name__,
+                    root,
+                )
                 if not retryable or attempt >= max_attempts:
-                    if validation_error:
+                    if error_kind == "validation":
                         message, raw = _format_validation_failure(exc)
                         raise LLMValidationError(message, raw_output=raw) from exc
+                    label = "transport" if error_kind == "transport" else "request"
                     raise LLMTransportExhaustedError(
-                        f"LLM transport request failed after {attempt} attempt(s)",
+                        f"LLM {label} request failed after {attempt} attempt(s)",
                         attempts=attempt,
                         cause=exc,
                     ) from exc
 
-                error_kind = "validation" if validation_error else "transport"
-                logger.warning(
-                    "LLM attempt %d/%d failed (%s): %s",
-                    attempt,
-                    max_attempts,
-                    error_kind,
-                    _root_cause(exc),
-                )
-                if transport_error:
+                if error_kind in {"transport", "unknown"}:
                     await _sleep_with_backoff(attempt - 1, exc)
 
         raise LLMTransportExhaustedError(

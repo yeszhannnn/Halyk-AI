@@ -19,14 +19,23 @@ from agent.shape import (
     shape_warnings,
 )
 from agent.stages import s1_ingest, s2_classify, s3_bind
+from agent.stages.s2_classify import first_nonempty_line
 from agent.template import load_template, template_scenarios, template_slots
 
 KYC_THRESHOLD_PATTERN = re.compile(
-    r"владеет\s+(\d{1,3}[.,]\d+)\s*%\s+и\s+более",
+    r"(?:"
+    r"владеет\s+(\d{1,3}[.,]\d+)\s*%\s+и\s+более"
+    r"|"
+    r"holds\s+(\d{1,3}[.,]\d+)\s*%\s+or\s+more"
+    r")",
     re.IGNORECASE,
 )
 PERIMETER_THRESHOLD_PATTERN = re.compile(
-    r"(\d{1,3}[.,]\d+)\s*%\s+.*(?:ниже|менее)",
+    r"(?:"
+    r"(\d{1,3}[.,]\d+)\s*%\s+.*(?:ниже|менее)"
+    r"|"
+    r"(\d{1,3}[.,]\d+)\s*%\s+.*(?:below|less than)"
+    r")",
     re.IGNORECASE,
 )
 DOC_TYPE_ORDER = (
@@ -121,13 +130,34 @@ def _distinct_kyc_thresholds(
         found = False
         for pattern in (KYC_THRESHOLD_PATTERN, PERIMETER_THRESHOLD_PATTERN):
             for match in pattern.finditer(text):
-                threshold = _parse_threshold(match.group(1))
+                threshold_raw = next(group for group in match.groups() if group)
+                threshold = _parse_threshold(threshold_raw)
                 if threshold is not None:
                     thresholds.add(threshold)
                     found = True
         if not found:
             unreadable_dossiers += 1
     return [format(value.normalize(), "f") for value in sorted(thresholds)], unreadable_dossiers
+
+
+def _collect_unmarked_pdfs(
+    inventory: dict[str, Any],
+    classified: dict[str, Any],
+) -> list[dict[str, str]]:
+    unmarked: list[dict[str, str]] = []
+    for doc_id, record in sorted((classified.get("documents") or {}).items()):
+        if record.get("doc_type") != "NOISE":
+            continue
+        doc = inventory.get("documents", {}).get(doc_id)
+        if not doc or doc.get("file_type") != "pdf":
+            continue
+        unmarked.append(
+            {
+                "doc_id": doc_id,
+                "first_line": first_nonempty_line(doc.get("pages") or []),
+            },
+        )
+    return unmarked
 
 
 def _collect_conflicts(
@@ -177,6 +207,7 @@ def run_preflight(input_dir: Path) -> dict[str, Any]:
     missing_audit = _missing_bindings(bound, "audit_notes")
     multiple_loans = _multiple_active_loans(bound)
     kyc_thresholds, unreadable_kyc_thresholds = _distinct_kyc_thresholds(inventory, bound)
+    unmarked_pdfs = _collect_unmarked_pdfs(inventory, classified)
     conflicts = _collect_conflicts(classified, bound)
 
     report = {
@@ -197,6 +228,7 @@ def run_preflight(input_dir: Path) -> dict[str, Any]:
         "kyc_thresholds": kyc_thresholds,
         "kyc_thresholds_text_layer_only": True,
         "unreadable_kyc_thresholds": unreadable_kyc_thresholds,
+        "unmarked_pdfs": unmarked_pdfs,
         "conflicts": conflicts,
         "warnings": shape_warnings(
             scenario_count=len(scenarios),
@@ -220,6 +252,14 @@ def print_preflight_report(report: dict[str, Any]) -> None:
     print("document types:")
     for doc_type, count in report["document_type_counts"].items():
         print(f"  {doc_type}: {count}")
+
+    unmarked_pdfs = report.get("unmarked_pdfs") or []
+    print(f"unmarked pdfs (no classification marker): {len(unmarked_pdfs)}")
+    for entry in unmarked_pdfs:
+        doc_id = entry.get("doc_id", "")
+        first_line = entry.get("first_line", "")
+        preview = first_line if first_line else "(empty)"
+        print(f"  {doc_id}: {preview}")
 
     ocr_documents = report.get("ocr_documents") or {}
     ocr_page_count = report["ocr_page_count"]

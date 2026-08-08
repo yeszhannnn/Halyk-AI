@@ -30,7 +30,8 @@ PPE_ADDITIONS_PATTERN = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 BORROWER_HEADER_PATTERN = re.compile(
-    r"Примечания к финансовой отчётности\s*\n\s*([^\n·]+?)\s*·",
+    r"(?:Примечания к финансовой отчётности|Notes to the Financial Statements)"
+    r"\s*\n\s*([^\n·]+?)\s*·",
     re.IGNORECASE,
 )
 CONSOLIDATED_DOC_MARKERS = (
