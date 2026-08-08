@@ -17,6 +17,7 @@ DEADLINE = datetime(2026, 8, 9, 23, 59, 59, tzinfo=ASTANA_TZ)
 CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "eszhan.e4051@gmail.com")
 
 MAX_CONCURRENT = int(os.getenv("MAX_CONCURRENT", "3"))
+TPM_LIMIT = int(os.getenv("TPM_LIMIT", "150000"))
 BUDGET_USD = Decimal(os.getenv("BUDGET_USD", "50.00"))
 
 MODEL_ID = os.getenv("OPENAI_MODEL", "gpt-4o-mini")

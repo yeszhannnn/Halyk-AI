@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from agent.parsing.numbers import normalize_decimal
 
 
 class OwnershipRowExtract(BaseModel):
@@ -16,6 +19,11 @@ class OwnershipRowExtract(BaseModel):
     ownership_pct_quote: str = Field(
         description="Verbatim quote containing the ownership percentage.",
     )
+
+    @field_validator("ownership_pct", mode="before")
+    @classmethod
+    def _parse_ownership_pct(cls, value: Any) -> Any:
+        return normalize_decimal(value, field_name="ownership_pct")
 
 
 class KycPartiesExtract(BaseModel):
@@ -51,3 +59,8 @@ class KycPartiesExtract(BaseModel):
     threshold_quote: str = Field(
         description="Verbatim quote of the threshold sentence (may match table_semantics_quote).",
     )
+
+    @field_validator("threshold_pct", mode="before")
+    @classmethod
+    def _parse_threshold_pct(cls, value: Any) -> Any:
+        return normalize_decimal(value, field_name="threshold_pct")

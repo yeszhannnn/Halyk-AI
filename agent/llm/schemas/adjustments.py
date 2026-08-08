@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from agent.parsing.numbers import normalize_decimal
 
 
 class EbitdaAddbackRowExtract(BaseModel):
@@ -19,6 +22,11 @@ class EbitdaAddbackRowExtract(BaseModel):
             "Leave null when not stated."
         ),
     )
+
+    @field_validator("amount", mode="before")
+    @classmethod
+    def _parse_amount(cls, value: Any) -> Any:
+        return normalize_decimal(value, field_name="amount")
 
 
 class AdjustmentExtract(BaseModel):
@@ -80,6 +88,13 @@ class AdjustmentExtract(BaseModel):
         default_factory=list,
         description="Table rows when kind is EBITDA_ADDBACK.",
     )
+
+    @field_validator("amount", "fx_source_amount", "fx_settlement_usd", "materiality_floor", mode="before")
+    @classmethod
+    def _parse_optional_decimal(cls, value: Any) -> Any:
+        if value is None or value == "":
+            return None
+        return normalize_decimal(value, field_name="amount")
 
 
 class VisionAdjustmentsExtract(BaseModel):

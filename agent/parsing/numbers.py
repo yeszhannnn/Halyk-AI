@@ -1,4 +1,9 @@
+import re
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from typing import Any
+
+_TRAILING_MULTIPLIER_RE = re.compile(r"[xх×X]\s*$")
+_PERCENT_SUFFIX_RE = re.compile(r"%\s*$")
 
 
 def parse_money(text: str) -> Decimal:
@@ -50,6 +55,26 @@ def parse_money(text: str) -> Decimal:
         raise ValueError(f"cannot parse monetary string: {text!r}") from exc
 
     return -value if negative else value
+
+
+def normalize_decimal(value: Any, *, field_name: str = "value") -> Decimal:
+    """Parse model output into Decimal without inventing defaults for bad input."""
+    if isinstance(value, Decimal):
+        return value
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be numeric")
+    if isinstance(value, int):
+        return Decimal(value)
+    if isinstance(value, float):
+        return Decimal(str(value))
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError(f"{field_name} must not be empty")
+        cleaned = _TRAILING_MULTIPLIER_RE.sub("", cleaned).strip()
+        cleaned = _PERCENT_SUFFIX_RE.sub("", cleaned).strip()
+        return parse_money(cleaned)
+    raise ValueError(f"{field_name} must be numeric, got {type(value).__name__}")
 
 
 def round_half_up(value, places: int) -> Decimal:

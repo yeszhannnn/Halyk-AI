@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from datetime import date
 from decimal import Decimal
@@ -9,16 +10,24 @@ from pathlib import Path
 from typing import Any
 
 from agent.evidence.quotes import verify_extracted_fields, verify_quote
-from agent.llm.client import LLMClient
+from agent.llm import client as llm_client
+from agent.llm.client import LLMClient, LLMTransportExhaustedError, LLMValidationError
 from agent.llm.schemas.covenants import (
     CategorySpecExtract,
     CovenantExtract,
+    CovenantExtractBase,
+    CovenantExtractNoSpringing,
+    CovenantExtractWithSpringing,
+    MetricKind,
     MetricSpecExtract,
     SpringingConditionExtract,
 )
 from agent.models import CategorySpec, Covenant, MetricSpec, Provenance, SpringingCondition
+from agent.parsing.numbers import normalize_decimal
 from agent.stages import StageResult
 from agent.template import load_template, template_cells
+
+logger = logging.getLogger(__name__)
 
 ARTICLE_6_HEADING = re.compile(
     r"Статья 6\s*[—–-]\s*Финансовые ковенанты",
@@ -27,6 +36,12 @@ ARTICLE_6_HEADING = re.compile(
 ARTICLE_7_HEADING = re.compile(r"Статья 7\b", re.IGNORECASE)
 PUNKT_MARKER = re.compile(r"Пункт 6\.(\d+)")
 REQUIRED_PUNKT_MARKERS = ("Пункт 6.1", "Пункт 6.2", "Пункт 6.3")
+THRESHOLD_RATIO_RE = re.compile(
+    r"(?<![\d,.])(\d+(?:[.,]\d+)?)\s*[xх×X]",
+)
+THRESHOLD_USD_RE = re.compile(
+    r"\$\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?|\d+(?:[.,]\d+)?)",
+)
 
 EXPECTED_YEAR = 2025
 COVENANT_YEAR = (date(2025, 1, 1), date(2025, 12, 31))
@@ -36,6 +51,26 @@ THRESHOLD_RATIO_MAX = Decimal("1000")
 THRESHOLD_USD_MIN = Decimal("1000")
 ZERO_THRESHOLD_MARKERS = ("0", "0.0", "0,0", "ноль", "zero")
 MAX_INVALID_COVENANT_FRACTION = Decimal("0.2")
+MAX_EXTRACTION_ATTEMPTS = 3
+
+
+class CovenantExtractionError(RuntimeError):
+    """Raised when a covenant clause cannot be extracted after all retries."""
+
+    def __init__(
+        self,
+        *,
+        scenario_id: str,
+        slot: str,
+        message: str,
+        cause: Exception | None = None,
+    ) -> None:
+        self.scenario_id = scenario_id
+        self.slot = slot
+        super().__init__(f"scenario={scenario_id} slot={slot}: {message}")
+        if cause is not None:
+            self.__cause__ = cause
+
 
 SYSTEM_PROMPT = """You extract bank loan financial covenants from Russian/English contract text.
 
@@ -46,12 +81,157 @@ Rules:
   не менее / not fall below / обеспечить не ниже → MIN). Never infer direction from the title alone.
 - threshold_unit is USD for dollar amounts, RATIO for multipliers like 0.04x or 1.20x.
 - metric.scope is BORROWER unless the clause explicitly uses group/consolidated/Группы scope.
-- metric.numerator/denominator describe how to compute the figure, including auditor reclass rules.
-- springing is non-null only when the test applies conditionally (e.g. "применяется только при условии, что...").
+- For metric.kind RATIO: provide numerator and denominator category legs.
+- For metric.kind SUM or COUNT: provide a single category leg (not numerator/denominator).
 - period_start and period_end must reflect the measurement period stated in the clause.
   Most covenants use 2025-01-01 through 2025-12-31; some specify a sub-period (e.g. fourth quarter).
 - Quotes must be exact contiguous substrings from the clause; do not paraphrase or normalize numbers.
 """
+
+SPRINGING_TRIGGER_PHRASES: tuple[tuple[str, str], ...] = (
+    ("применяется только если", "ru_applies_only_if"),
+    ("только при условии, что", "ru_only_if_condition"),
+    ("при условии, что", "ru_if_condition"),
+    ("в случае если", "ru_in_case_if"),
+    ("если совокупные", "ru_if_aggregate"),
+    ("only applies if", "en_only_applies_if"),
+    ("applies only if", "en_applies_only_if"),
+    ("only if", "en_only_if"),
+    ("only when", "en_only_when"),
+    ("in the event that", "en_in_event"),
+    ("if the aggregate", "en_if_aggregate"),
+    ("if aggregate", "en_if_aggregate_short"),
+)
+
+
+def _detect_springing_trigger(text: str) -> str | None:
+    normalized = " ".join(text.casefold().split())
+    for phrase, label in SPRINGING_TRIGGER_PHRASES:
+        if phrase.casefold() in normalized:
+            return label
+    return None
+
+
+def _log_springing_trigger(scenario_id: str, slot: str, label: str, phrase: str) -> None:
+    logger.info(
+        "s4a springing trigger %s scenario=%s slot=6.%s phrase=%s",
+        label,
+        scenario_id,
+        slot,
+        phrase,
+    )
+
+
+def _springing_trigger_label(text: str) -> tuple[str, str] | None:
+    normalized = " ".join(text.casefold().split())
+    for phrase, label in SPRINGING_TRIGGER_PHRASES:
+        if phrase.casefold() in normalized:
+            return label, phrase
+    return None
+
+
+def _metric_primary_category(metric: MetricSpecExtract) -> CategorySpecExtract:
+    if metric.kind == MetricKind.RATIO:
+        assert metric.numerator is not None
+        return metric.numerator
+    assert metric.category is not None
+    return metric.category
+
+
+def _metric_category_legs(metric: MetricSpecExtract) -> list[tuple[str, CategorySpecExtract]]:
+    if metric.kind == MetricKind.RATIO:
+        assert metric.numerator is not None and metric.denominator is not None
+        return [
+            ("numerator", metric.numerator),
+            ("denominator", metric.denominator),
+        ]
+    assert metric.category is not None
+    return [("category", metric.category)]
+
+
+def _to_covenant_extract(
+    raw: CovenantExtractBase,
+    springing: SpringingConditionExtract | None,
+) -> CovenantExtract:
+    data = raw.model_dump(mode="python")
+    data["springing"] = springing
+    return CovenantExtract.model_validate(data)
+
+
+def _normalize_threshold_number(raw: str) -> Decimal:
+    return normalize_decimal(raw, field_name="threshold")
+
+
+def _extract_threshold_candidates(text: str) -> list[tuple[Decimal, str]]:
+    candidates: list[tuple[Decimal, str]] = []
+    seen: set[Decimal] = set()
+    for pattern in (THRESHOLD_RATIO_RE, THRESHOLD_USD_RE):
+        for match in pattern.finditer(text):
+            value = _normalize_threshold_number(match.group(1))
+            if value in seen:
+                continue
+            seen.add(value)
+            candidates.append((value, match.group(0)))
+    return candidates
+
+
+def _threshold_matches_candidates(
+    threshold: Decimal,
+    candidates: list[tuple[Decimal, str]],
+) -> bool:
+    if not candidates:
+        return True
+    return any(threshold == candidate for candidate, _token in candidates)
+
+
+def _filter_threshold_candidates_by_unit(
+    candidates: list[tuple[Decimal, str]],
+    unit: str,
+) -> list[tuple[Decimal, str]]:
+    if unit == "RATIO":
+        return [
+            (value, token)
+            for value, token in candidates
+            if re.search(r"[xх×X]\s*$", token)
+        ]
+    if unit == "USD":
+        return [(value, token) for value, token in candidates if "$" in token]
+    return candidates
+
+
+def _threshold_anchor_issue(
+    extracted: CovenantExtract,
+    candidates: list[tuple[Decimal, str]],
+) -> str | None:
+    unit = extracted.threshold_unit.value
+    filtered = _filter_threshold_candidates_by_unit(candidates, unit)
+    if not filtered:
+        return None
+    if _threshold_matches_candidates(extracted.threshold, filtered):
+        return None
+    return (
+        "THRESHOLD_NOT_IN_CLAUSE: threshold must equal one of "
+        f"{_format_threshold_candidates(filtered)}; got {_decimal_to_str(extracted.threshold)}"
+    )
+
+
+def _format_threshold_candidates(candidates: list[tuple[Decimal, str]]) -> str:
+    return ", ".join(f"{token} ({value})" for value, token in candidates)
+
+
+def _raise_extraction_failure(
+    *,
+    scenario_id: str,
+    slot: str,
+    message: str,
+    cause: Exception | None = None,
+) -> None:
+    raise CovenantExtractionError(
+        scenario_id=scenario_id,
+        slot=f"6.{slot}",
+        message=message,
+        cause=cause,
+    )
 
 
 def _extract_article_6(pages: list[str]) -> str:
@@ -126,46 +306,31 @@ def _quote_checks(result: CovenantExtract, verification_text: str) -> list[tuple
         ("metric_kind", result.metric.kind_quote, verification_text),
         ("metric_scope", result.metric.scope_quote, verification_text),
         ("metric_notes", result.notes_quote, verification_text),
-        (
-            "metric_numerator_include",
-            result.metric.numerator.include_keywords_quote,
-            verification_text,
-        ),
-        ("metric_numerator_sign", result.metric.numerator.sign_quote, verification_text),
-        (
-            "metric_numerator_reclass",
-            result.metric.numerator.apply_reclass_quote,
-            verification_text,
-        ),
     ]
-    if result.metric.denominator is not None:
+    for leg, category in _metric_category_legs(result.metric):
         checks.extend(
             [
                 (
-                    "metric_denominator_include",
-                    result.metric.denominator.include_keywords_quote,
+                    f"metric_{leg}_include",
+                    category.include_keywords_quote,
                     verification_text,
                 ),
+                (f"metric_{leg}_sign", category.sign_quote, verification_text),
                 (
-                    "metric_denominator_sign",
-                    result.metric.denominator.sign_quote,
-                    verification_text,
-                ),
-                (
-                    "metric_denominator_reclass",
-                    result.metric.denominator.apply_reclass_quote,
+                    f"metric_{leg}_reclass",
+                    category.apply_reclass_quote,
                     verification_text,
                 ),
             ],
         )
-    if result.metric.numerator.exclude_keywords_quote:
-        checks.append(
-            (
-                "metric_numerator_exclude",
-                result.metric.numerator.exclude_keywords_quote,
-                verification_text,
-            ),
-        )
+        if category.exclude_keywords_quote:
+            checks.append(
+                (
+                    f"metric_{leg}_exclude",
+                    category.exclude_keywords_quote,
+                    verification_text,
+                ),
+            )
     if result.springing is not None:
         checks.extend(_springing_quote_checks(result.springing, verification_text))
     return checks
@@ -175,19 +340,23 @@ def _springing_quote_checks(
     springing: SpringingConditionExtract,
     verification_text: str,
 ) -> list[tuple[str, str, str]]:
-    return [
+    checks = [
         ("springing_operator", springing.operator_quote, verification_text),
         ("springing_value", springing.value_quote, verification_text),
         ("springing_condition", springing.condition_quote, verification_text),
         ("springing_metric_kind", springing.metric.kind_quote, verification_text),
         ("springing_metric_scope", springing.metric.scope_quote, verification_text),
         ("springing_metric_notes", springing.metric.notes_quote, verification_text),
+    ]
+    primary = _metric_primary_category(springing.metric)
+    checks.append(
         (
-            "springing_metric_numerator_include",
-            springing.metric.numerator.include_keywords_quote,
+            "springing_metric_category_include",
+            primary.include_keywords_quote,
             verification_text,
         ),
-    ]
+    )
+    return checks
 
 
 def _category_from_extract(spec: CategorySpecExtract) -> CategorySpec:
@@ -200,10 +369,18 @@ def _category_from_extract(spec: CategorySpecExtract) -> CategorySpec:
 
 
 def _metric_from_extract(spec: MetricSpecExtract, *, notes: str = "") -> MetricSpec:
+    if spec.kind == MetricKind.RATIO:
+        assert spec.numerator is not None and spec.denominator is not None
+        numerator = _category_from_extract(spec.numerator)
+        denominator = _category_from_extract(spec.denominator)
+    else:
+        assert spec.category is not None
+        numerator = _category_from_extract(spec.category)
+        denominator = None
     return MetricSpec(
         kind=spec.kind.value,
-        numerator=_category_from_extract(spec.numerator),
-        denominator=_category_from_extract(spec.denominator) if spec.denominator else None,
+        numerator=numerator,
+        denominator=denominator,
         scope=spec.scope.value,
         notes=notes or spec.notes,
     )
@@ -523,13 +700,14 @@ def _validate_covenant_extract(
 
     issues.extend(
         _validate_category_spec(
-            extracted.metric.numerator,
-            leg="numerator",
+            _metric_primary_category(extracted.metric),
+            leg="primary",
             scenario_id=scenario_id,
             slot=slot,
         ),
     )
-    if extracted.metric.denominator is not None:
+    if extracted.metric.kind == MetricKind.RATIO:
+        assert extracted.metric.denominator is not None
         issues.extend(
             _validate_category_spec(
                 extracted.metric.denominator,
@@ -539,18 +717,20 @@ def _validate_covenant_extract(
             ),
         )
     if extracted.springing is not None:
+        springing_metric = extracted.springing.metric
         issues.extend(
             _validate_category_spec(
-                extracted.springing.metric.numerator,
-                leg="springing_numerator",
+                _metric_primary_category(springing_metric),
+                leg="springing_primary",
                 scenario_id=scenario_id,
                 slot=slot,
             ),
         )
-        if extracted.springing.metric.denominator is not None:
+        if springing_metric.kind == MetricKind.RATIO:
+            assert springing_metric.denominator is not None
             issues.extend(
                 _validate_category_spec(
-                    extracted.springing.metric.denominator,
+                    springing_metric.denominator,
                     leg="springing_denominator",
                     scenario_id=scenario_id,
                     slot=slot,
@@ -605,30 +785,113 @@ async def _extract_covenant_item(
     item_text: str,
     verification_text: str,
     validation_feedback: str | None = None,
+    threshold_candidates: list[tuple[Decimal, str]] | None = None,
+    expect_springing: bool | None = None,
 ) -> tuple[CovenantExtract, dict[str, bool]]:
-    user_content = (
-        f"Scenario: {scenario_id}\n"
-        f"Slot: 6.{slot}\n\n"
-        "Extract the covenant from this clause text:\n\n"
-        f"{item_text}"
+    candidates = threshold_candidates or _extract_threshold_candidates(item_text)
+    feedback = validation_feedback
+    active_candidates = threshold_candidates
+    extracted: CovenantExtract | None = None
+
+    if expect_springing is None:
+        trigger = _springing_trigger_label(item_text)
+        expect_springing = trigger is not None
+        if trigger is not None:
+            label, phrase = trigger
+            _log_springing_trigger(scenario_id, slot, label, phrase)
+
+    response_model: type[CovenantExtractBase] = (
+        CovenantExtractWithSpringing if expect_springing else CovenantExtractNoSpringing
     )
-    if validation_feedback:
-        user_content += (
-            "\n\nYour prior extraction failed structural validation:\n"
-            f"{validation_feedback}\n"
-            "Return a corrected extraction. Do not swap the covenant threshold with "
-            "the springing trigger value."
+
+    for attempt in range(1, MAX_EXTRACTION_ATTEMPTS + 1):
+        user_content = (
+            f"Scenario: {scenario_id}\n"
+            f"Slot: 6.{slot}\n\n"
+            "Extract the covenant from this clause text:\n\n"
+            f"{item_text}"
         )
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_content},
-    ]
-    extracted = await client.complete_verified(
-        response_model=CovenantExtract,
-        messages=messages,
-        quote_checks=lambda result: _quote_checks(result, verification_text),
-        **({"use_cache": False} if validation_feedback else {}),
-    )
+        if active_candidates:
+            user_content += (
+                "\n\nThe threshold must be exactly one of these values found in the clause: "
+                f"{_format_threshold_candidates(active_candidates)}."
+            )
+        if feedback:
+            user_content += (
+                "\n\nYour prior extraction failed structural validation:\n"
+                f"{feedback}\n"
+                "Return a corrected extraction. Do not swap the covenant threshold with "
+                "the springing trigger value."
+            )
+            if expect_springing:
+                user_content += (
+                    " If springing is present, include operator, value, operator_quote, "
+                    "value_quote, and condition_quote."
+                )
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ]
+        try:
+            raw = await client.complete_verified(
+                response_model=response_model,
+                messages=messages,
+                quote_checks=lambda result: _quote_checks(
+                    _to_covenant_extract(
+                        result,
+                        springing=result.springing if expect_springing else None,
+                    ),
+                    verification_text,
+                ),
+                **({"use_cache": False} if active_candidates else {}),
+            )
+            extracted = _to_covenant_extract(
+                raw,
+                springing=raw.springing if expect_springing else None,
+            )
+        except LLMTransportExhaustedError as exc:
+            _raise_extraction_failure(
+                scenario_id=scenario_id,
+                slot=slot,
+                message=str(exc),
+                cause=exc,
+            )
+        except LLMValidationError as exc:
+            if attempt >= MAX_EXTRACTION_ATTEMPTS:
+                _raise_extraction_failure(
+                    scenario_id=scenario_id,
+                    slot=slot,
+                    message=str(exc),
+                    cause=exc,
+                )
+            feedback = str(exc)
+            continue
+
+        if llm_client.REPLAY_DIR is not None:
+            break
+
+        anchor_issue = _threshold_anchor_issue(extracted, candidates)
+        if anchor_issue is None:
+            break
+        if attempt >= MAX_EXTRACTION_ATTEMPTS:
+            _raise_extraction_failure(
+                scenario_id=scenario_id,
+                slot=slot,
+                message=anchor_issue,
+            )
+        feedback = anchor_issue
+        active_candidates = _filter_threshold_candidates_by_unit(
+            candidates,
+            extracted.threshold_unit.value,
+        ) or candidates
+
+    if extracted is None:
+        _raise_extraction_failure(
+            scenario_id=scenario_id,
+            slot=slot,
+            message="covenant extraction returned no result",
+        )
+
     payload = extracted.model_dump(mode="python")
     verify_extracted_fields(payload, fields=_quote_checks(extracted, verification_text))
     verification = _collect_verification_flags(payload)
@@ -650,60 +913,19 @@ async def _process_scenario(
     for slot in SLOTS:
         item_text = items[slot]
         fallback_page, _, _ = _page_span_for_text(pages, item_text[:120])
-        try:
-            extracted, verification = await _extract_covenant_item(
-                client,
-                scenario_id=scenario_id,
-                slot=slot,
-                item_text=item_text,
-                verification_text=item_text,
-            )
-        except Exception as exc:  # noqa: BLE001 — one bad slot must not drop the scenario
-            conflicts.append(
-                {
-                    "kind": "COVENANT_EXTRACTION_FAILED",
-                    "scenario_id": scenario_id,
-                    "slot": f"6.{slot}",
-                    "error": str(exc),
-                },
-            )
-            continue
+        extracted, verification = await _extract_covenant_item(
+            client,
+            scenario_id=scenario_id,
+            slot=slot,
+            item_text=item_text,
+            verification_text=item_text,
+        )
 
         validation_issues = _validate_covenant_extract(
             extracted,
             scenario_id=scenario_id,
             slot=slot,
         )
-        if validation_issues:
-            feedback = "; ".join(
-                f"{issue['kind']}: {issue.get('threshold') or issue.get('metric_kind', '')}"
-                for issue in validation_issues
-            )
-            try:
-                extracted, verification = await _extract_covenant_item(
-                    client,
-                    scenario_id=scenario_id,
-                    slot=slot,
-                    item_text=item_text,
-                    verification_text=item_text,
-                    validation_feedback=feedback,
-                )
-            except Exception as exc:  # noqa: BLE001
-                conflicts.extend(validation_issues)
-                conflicts.append(
-                    {
-                        "kind": "COVENANT_VALIDATION_RETRY_FAILED",
-                        "scenario_id": scenario_id,
-                        "slot": f"6.{slot}",
-                        "error": str(exc),
-                    },
-                )
-                continue
-            validation_issues = _validate_covenant_extract(
-                extracted,
-                scenario_id=scenario_id,
-                slot=slot,
-            )
         conflicts.extend(validation_issues)
 
         period = (extracted.period_start, extracted.period_end)
@@ -747,27 +969,18 @@ async def _run_async(work_dir: Path) -> StageResult:
                 if scenario_id not in scenarios:
                     conflicts.append({"kind": "EXTRA_SCENARIO", "scenario_id": scenario_id})
                 continue
-            try:
-                pages = inventory["documents"][loan_doc_id]["pages"]
-                scenario_results = await _process_scenario(
-                    client,
-                    scenario_id=scenario_id,
-                    doc_id=loan_doc_id,
-                    pages=pages,
-                    conflicts=conflicts,
-                )
-                extracted_by_scenario[scenario_id] = {
-                    covenant.slot: (covenant, verification)
-                    for covenant, verification, _issues in scenario_results
-                }
-            except Exception as exc:  # noqa: BLE001 — structural gaps must not abort
-                conflicts.append(
-                    {
-                        "kind": "COVENANT_EXTRACTION_FAILED",
-                        "scenario_id": scenario_id,
-                        "error": str(exc),
-                    },
-                )
+            pages = inventory["documents"][loan_doc_id]["pages"]
+            scenario_results = await _process_scenario(
+                client,
+                scenario_id=scenario_id,
+                doc_id=loan_doc_id,
+                pages=pages,
+                conflicts=conflicts,
+            )
+            extracted_by_scenario[scenario_id] = {
+                covenant.slot: (covenant, verification)
+                for covenant, verification, _issues in scenario_results
+            }
 
         for scenario_id, slot in template_cells(template):
             loan_doc_id = scenarios.get(scenario_id, {}).get("loan")
@@ -775,15 +988,22 @@ async def _run_async(work_dir: Path) -> StageResult:
             if slot in extracted_by_slot:
                 covenant, verification = extracted_by_slot[slot]
                 serialized.append(_serialize_covenant(covenant, verification))
-            else:
-                if loan_doc_id:
-                    conflicts.append(
-                        {
-                            "kind": "NEW_SLOT",
-                            "scenario_id": scenario_id,
-                            "slot": slot,
-                        },
+            elif loan_doc_id:
+                if slot in {f"6.{s}" for s in SLOTS}:
+                    _raise_extraction_failure(
+                        scenario_id=scenario_id,
+                        slot=slot.removeprefix("6."),
+                        message="covenant missing after extraction",
                     )
+                conflicts.append(
+                    {
+                        "kind": "NEW_SLOT",
+                        "scenario_id": scenario_id,
+                        "slot": slot,
+                    },
+                )
+                serialized.append(_placeholder_covenant(scenario_id, slot))
+            else:
                 serialized.append(_placeholder_covenant(scenario_id, slot))
 
     extracted_covenants = [covenant for covenant in serialized if not covenant.get("degraded")]
@@ -819,9 +1039,20 @@ async def _run_async(work_dir: Path) -> StageResult:
         if covenant["slot"] == "6.2"
     }
 
+    stable_conflicts = sorted(
+        conflicts,
+        key=lambda conflict: (
+            conflict.get("kind", ""),
+            conflict.get("scenario_id", ""),
+            conflict.get("slot", ""),
+            conflict.get("leg", ""),
+            conflict.get("covenant_key", ""),
+        ),
+    )
+
     payload = {
         "covenants": serialized,
-        "conflicts": conflicts,
+        "conflicts": stable_conflicts,
         "summary": {
             "count": len(serialized),
             "springing_count": springing_count,

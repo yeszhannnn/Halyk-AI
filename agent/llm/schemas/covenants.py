@@ -3,9 +3,11 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 from enum import Enum
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+from agent.parsing.numbers import normalize_decimal
 
 
 class Direction(str, Enum):
@@ -42,27 +44,10 @@ def _uppercase_str(value: Any) -> Any:
             return "OUTFLOW"
         if upper in {"INFLOWS", "POSITIVE", "INFLOW"}:
             return "INFLOW"
-        if upper in {"VALUE", "BOTH", "ABSOLUTE"}:
+        if upper in {"VALUE", "BOTH", "ABSOLUTE", "NONE", "N/A", "NA", "ВСЕ", "ALL"}:
             return "BOTH"
         return upper
     return value
-
-
-def _parse_decimal_field(value: Any, *, field_name: str) -> Decimal:
-    if isinstance(value, Decimal):
-        return value
-    if isinstance(value, bool):
-        raise ValueError(f"{field_name} must be numeric")
-    if isinstance(value, int):
-        return Decimal(value)
-    if isinstance(value, float):
-        return Decimal(str(value))
-    if isinstance(value, str):
-        cleaned = value.strip().replace(",", "").replace(" ", "")
-        if not cleaned:
-            raise ValueError(f"{field_name} must not be empty")
-        return Decimal(cleaned)
-    raise ValueError(f"{field_name} must be numeric, got {type(value).__name__}")
 
 
 def _parse_date_field(value: Any, *, field_name: str) -> date:
@@ -109,12 +94,24 @@ class CategorySpecExtract(BaseModel):
 
 
 class MetricSpecExtract(BaseModel):
-    kind: MetricKind
+    kind: MetricKind = Field(
+        description="RATIO for quotient metrics; SUM for summed USD caps; COUNT for counted metrics.",
+    )
     kind_quote: str = Field(
         description="Verbatim quote showing ratio, sum, or count computation.",
     )
-    numerator: CategorySpecExtract
-    denominator: CategorySpecExtract | None = None
+    numerator: CategorySpecExtract | None = Field(
+        default=None,
+        description="Numerator category when kind is RATIO.",
+    )
+    denominator: CategorySpecExtract | None = Field(
+        default=None,
+        description="Denominator category when kind is RATIO.",
+    )
+    category: CategorySpecExtract | None = Field(
+        default=None,
+        description="Aggregate category when kind is SUM or COUNT.",
+    )
     scope: MetricScope = Field(
         description="BORROWER if only borrower financials; GROUP if consolidated group scope.",
     )
@@ -133,7 +130,41 @@ class MetricSpecExtract(BaseModel):
     @field_validator("kind", "scope", mode="before")
     @classmethod
     def _normalize_enums(cls, value: Any) -> Any:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return value
         return _uppercase_str(value)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _infer_shape(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        kind = data.get("kind")
+        if kind is None or (isinstance(kind, str) and not kind.strip()):
+            if data.get("denominator") is not None:
+                data["kind"] = "RATIO"
+            else:
+                data["kind"] = "SUM"
+        else:
+            data["kind"] = _uppercase_str(kind)
+        kind = data["kind"]
+        if kind in {"SUM", "COUNT"} and data.get("category") is None and data.get("numerator") is not None:
+            data["category"] = data["numerator"]
+        if not data.get("scope"):
+            data["scope"] = "BORROWER"
+        if not str(data.get("scope_quote", "")).strip():
+            data["scope_quote"] = str(data.get("kind_quote", ""))
+        return data
+
+    @model_validator(mode="after")
+    def _validate_shape(self) -> Self:
+        if self.kind == MetricKind.RATIO:
+            if self.numerator is None or self.denominator is None:
+                raise ValueError("RATIO metric requires numerator and denominator")
+        elif self.category is None:
+            raise ValueError(f"{self.kind.value} metric requires category")
+        return self
 
 
 class SpringingConditionExtract(BaseModel):
@@ -155,10 +186,39 @@ class SpringingConditionExtract(BaseModel):
     def _parse_value(cls, value: Any) -> Any:
         if value is None:
             return value
-        return _parse_decimal_field(value, field_name="springing.value")
+        return normalize_decimal(value, field_name="springing.value")
 
 
-class CovenantExtract(BaseModel):
+def _infer_metric_kind(metric: dict[str, Any], covenant_data: dict[str, Any]) -> str:
+    kind = metric.get("kind")
+    if kind is not None and str(kind).strip():
+        return str(_uppercase_str(kind))
+    unit = covenant_data.get("threshold_unit")
+    if unit is not None and str(unit).strip():
+        normalized_unit = str(_uppercase_str(unit))
+        if normalized_unit == "RATIO":
+            return "RATIO"
+        if normalized_unit == "USD":
+            return "SUM"
+    if metric.get("denominator") is not None:
+        return "RATIO"
+    return "SUM"
+
+
+def _normalize_metric_dict(metric: dict[str, Any], covenant_data: dict[str, Any]) -> dict[str, Any]:
+    metric = dict(metric)
+    metric["kind"] = _infer_metric_kind(metric, covenant_data)
+    kind = metric["kind"]
+    if kind in {"SUM", "COUNT"} and metric.get("category") is None and metric.get("numerator") is not None:
+        metric["category"] = metric["numerator"]
+    if not metric.get("scope"):
+        metric["scope"] = "BORROWER"
+    if not str(metric.get("scope_quote", "")).strip():
+        metric["scope_quote"] = str(metric.get("kind_quote", ""))
+    return metric
+
+
+class CovenantExtractBase(BaseModel):
     title: str
     title_quote: str = Field(
         description="Verbatim quote containing the covenant title or heading.",
@@ -194,13 +254,6 @@ class CovenantExtract(BaseModel):
     period_quote: str = Field(
         description="Verbatim quote containing the covenant period dates.",
     )
-    springing: SpringingConditionExtract | None = Field(
-        default=None,
-        description=(
-            "Present only when the covenant test applies conditionally "
-            "(e.g. only if some quantity exceeds a value). Otherwise null."
-        ),
-    )
 
     @field_validator("direction", "threshold_unit", mode="before")
     @classmethod
@@ -210,7 +263,7 @@ class CovenantExtract(BaseModel):
     @field_validator("threshold", mode="before")
     @classmethod
     def _parse_threshold(cls, value: Any) -> Any:
-        return _parse_decimal_field(value, field_name="threshold")
+        return normalize_decimal(value, field_name="threshold")
 
     @field_validator("period_start", "period_end", mode="before")
     @classmethod
@@ -224,8 +277,35 @@ class CovenantExtract(BaseModel):
             return data
         metric = data.get("metric")
         if isinstance(metric, dict):
+            metric = _normalize_metric_dict(metric, data)
+            data["metric"] = metric
             if data.get("notes") is None and metric.get("notes"):
                 data["notes"] = metric["notes"]
             if data.get("notes_quote") is None and metric.get("notes_quote"):
                 data["notes_quote"] = metric["notes_quote"]
+        springing = data.get("springing")
+        if isinstance(springing, dict):
+            springing_metric = springing.get("metric")
+            if isinstance(springing_metric, dict):
+                springing = dict(springing)
+                springing["metric"] = _normalize_metric_dict(springing_metric, data)
+                data["springing"] = springing
         return data
+
+
+class CovenantExtractNoSpringing(CovenantExtractBase):
+    """Covenant extraction when the clause has no springing trigger phrase."""
+
+
+class CovenantExtractWithSpringing(CovenantExtractBase):
+    springing: SpringingConditionExtract
+
+
+class CovenantExtract(CovenantExtractBase):
+    springing: SpringingConditionExtract | None = Field(
+        default=None,
+        description=(
+            "Present only when the covenant test applies conditionally "
+            "(e.g. only if some quantity exceeds a value). Otherwise null."
+        ),
+    )

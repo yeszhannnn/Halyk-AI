@@ -18,10 +18,23 @@ from agent.parsing.numbers import parse_money, round_half_up
         ("-1 500.00", Decimal("-1500.00")),
         ("($142 118.64)", Decimal("-142118.64")),
         ("72\u00a0146.75", Decimal("72146.75")),
+        ("$300,000.00", Decimal("300000.00")),
+        ("0.42x", Decimal("0.42")),
+        ("1.70x", Decimal("1.70")),
+        ("41.2%", Decimal("41.2")),
     ],
 )
 def test_parse_money(text, expected):
-    assert parse_money(text) == expected
+    from agent.parsing.numbers import normalize_decimal
+
+    assert normalize_decimal(text) == expected
+
+
+def test_normalize_decimal_rejects_unparseable() -> None:
+    from agent.parsing.numbers import normalize_decimal
+
+    with pytest.raises(ValueError):
+        normalize_decimal("not-a-number")
 
 
 def test_round_half_up_two_places():

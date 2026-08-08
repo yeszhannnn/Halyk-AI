@@ -15,6 +15,7 @@ from agent.llm.client import LLMClient
 from agent.llm.schemas.adjustments import AdjustmentExtract, VisionAdjustmentsExtract
 from agent.llm.vision_guard import complete_vision_dual
 from agent.models import Provenance
+from agent.parsing.numbers import normalize_decimal
 from agent.shape import is_canonical_open_dataset
 from agent.stages import StageResult
 from agent.stages.s4b_parties import normalize_counterparty
@@ -78,10 +79,10 @@ def _decimal_to_str(value: Decimal) -> str:
 def _parse_amount(value: str | None) -> Decimal | None:
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return None
-    cleaned = str(value).strip().replace("$", "").replace(",", "").replace(" ", "")
+    cleaned = str(value).strip()
     if not cleaned:
         return None
-    return Decimal(cleaned)
+    return normalize_decimal(cleaned, field_name="amount")
 
 
 def _ocr_page_image_paths(

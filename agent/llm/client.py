@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 import random
 import re
 from dataclasses import dataclass, field
@@ -17,13 +18,25 @@ from openai import APIConnectionError, APITimeoutError, AsyncOpenAI, RateLimitEr
 from pydantic import BaseModel, ValidationError as PydanticValidationError
 
 from agent.config import BUDGET_USD, MAX_CONCURRENT, MODEL_ID, OPENAI_SEED, TEMPERATURE
+from agent.llm.token_bucket import get_token_bucket
 
 T = TypeVar("T", bound=BaseModel)
 
+logger = logging.getLogger(__name__)
+
 CACHE_DIR = Path(".cache/llm")
 MAX_TRANSPORT_RETRIES = 5
-MAX_VALIDATION_RETRIES = 1
-_RETRY_BODY_HINT = re.compile(r"try again in (\d+(?:\.\d+)?)\s*s", re.IGNORECASE)
+MAX_VALIDATION_RETRIES = 2
+MAX_REQUEST_ATTEMPTS = MAX_TRANSPORT_RETRIES + MAX_VALIDATION_RETRIES + 1
+_COMPLETION_TOKEN_ESTIMATE = 500
+_RETRY_BODY_HINT_SECONDS = re.compile(
+    r"try again in (\d+(?:\.\d+)?)\s*s",
+    re.IGNORECASE,
+)
+_RETRY_BODY_HINT_MILLISECONDS = re.compile(
+    r"try again in (\d+(?:\.\d+)?)\s*ms",
+    re.IGNORECASE,
+)
 
 MODEL_PRICING_PER_MILLION: dict[str, tuple[Decimal, Decimal]] = {
     "gpt-4o": (Decimal("2.50"), Decimal("10.00")),
@@ -41,6 +54,15 @@ class LLMValidationError(RuntimeError):
     def __init__(self, message: str, *, raw_output: Any = None) -> None:
         super().__init__(message)
         self.raw_output = raw_output
+
+
+class LLMTransportExhaustedError(RuntimeError):
+    """Raised when transport retries are exhausted for a single LLM request."""
+
+    def __init__(self, message: str, *, attempts: int, cause: Exception | None = None) -> None:
+        super().__init__(message)
+        self.attempts = attempts
+        self.cause = cause
 
 
 @dataclass
@@ -236,8 +258,40 @@ def _ensure_budget() -> None:
         )
 
 
-def _retry_after_seconds(exc: RateLimitError) -> float | None:
-    response = getattr(exc, "response", None)
+def _iter_exception_chain(exc: BaseException) -> list[BaseException]:
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    return chain
+
+
+def _root_cause(exc: BaseException) -> BaseException:
+    chain = _iter_exception_chain(exc)
+    return chain[-1] if chain else exc
+
+
+def _find_in_chain(exc: BaseException, predicate: Callable[[BaseException], bool]) -> BaseException | None:
+    for item in _iter_exception_chain(exc):
+        if predicate(item):
+            return item
+    return None
+
+
+def _estimate_request_tokens(messages: list[dict[str, Any]]) -> int:
+    serialized = json.dumps(messages, ensure_ascii=False)
+    return max(1, len(serialized) // 4) + _COMPLETION_TOKEN_ESTIMATE
+
+
+def _retry_after_seconds(exc: Exception) -> float | None:
+    rate_limit = _find_in_chain(exc, lambda item: isinstance(item, RateLimitError))
+    if rate_limit is None:
+        return None
+
+    response = getattr(rate_limit, "response", None)
     if response is not None:
         header_value = response.headers.get("retry-after")
         if header_value is not None:
@@ -246,57 +300,68 @@ def _retry_after_seconds(exc: RateLimitError) -> float | None:
             except ValueError:
                 pass
 
-    for chunk in (str(exc), str(getattr(exc, "body", ""))):
-        match = _RETRY_BODY_HINT.search(chunk)
+    for chunk in (str(rate_limit), str(getattr(rate_limit, "body", ""))):
+        match = _RETRY_BODY_HINT_MILLISECONDS.search(chunk)
+        if match:
+            return float(match.group(1)) / 1000.0
+        match = _RETRY_BODY_HINT_SECONDS.search(chunk)
         if match:
             return float(match.group(1))
     return None
 
 
 def _is_transport_error(exc: Exception) -> bool:
-    return isinstance(exc, (RateLimitError, APIConnectionError, APITimeoutError))
+    return _find_in_chain(
+        exc,
+        lambda item: isinstance(item, (RateLimitError, APIConnectionError, APITimeoutError)),
+    ) is not None
 
 
 def _is_rate_limited(exc: Exception) -> bool:
-    if isinstance(exc, RateLimitError):
+    if _find_in_chain(exc, lambda item: isinstance(item, RateLimitError)) is not None:
         return True
-    if isinstance(exc, InstructorRetryException):
-        if isinstance(exc.__cause__, RateLimitError):
-            return True
-        message = str(exc).casefold()
-        if "rate limit" in message or "429" in message:
-            return True
-    return False
+    message = " ".join(str(item) for item in _iter_exception_chain(exc)).casefold()
+    return "rate limit" in message or "429" in message
 
 
 def _is_validation_error(exc: Exception) -> bool:
-    if _is_rate_limited(exc):
+    if _is_transport_error(exc) or _is_rate_limited(exc):
         return False
-    return isinstance(
+    return _find_in_chain(
         exc,
-        (
-            InstructorRetryException,
-            PydanticValidationError,
-            ResponseParsingError,
-            LLMValidationError,
+        lambda item: isinstance(
+            item,
+            (
+                InstructorRetryException,
+                PydanticValidationError,
+                ResponseParsingError,
+                LLMValidationError,
+            ),
         ),
-    )
+    ) is not None
 
 
 def _format_validation_failure(exc: Exception) -> tuple[str, Any]:
+    root = _root_cause(exc)
+    if isinstance(root, PydanticValidationError):
+        return str(root), getattr(exc, "last_completion", None) if isinstance(exc, InstructorRetryException) else None
     if isinstance(exc, InstructorRetryException):
         raw = exc.last_completion
-        lines = [f"validation failed after {exc.n_attempts} attempt(s)"]
         for attempt in exc.failed_attempts:
-            lines.append(f"  attempt {attempt.attempt_number}: {attempt.exception}")
+            cause = attempt.exception
+            if isinstance(cause, PydanticValidationError):
+                return str(cause), raw
+            nested = _find_in_chain(cause, lambda item: isinstance(item, PydanticValidationError))
+            if nested is not None:
+                return str(nested), raw
         if raw is not None:
-            lines.append(f"raw model output: {raw}")
-        return "\n".join(lines), raw
-    return str(exc), None
+            return f"schema validation failed: {root}", raw
+        return f"schema validation failed: {root}", None
+    return str(root), None
 
 
 async def _sleep_with_backoff(attempt: int, exc: Exception | None = None) -> None:
-    if isinstance(exc, RateLimitError):
+    if exc is not None and _is_rate_limited(exc):
         retry_after = _retry_after_seconds(exc)
         if retry_after is not None:
             await asyncio.sleep(retry_after + random.uniform(0, 0.25))
@@ -320,6 +385,7 @@ class LLMClient:
         self.model = model or MODEL_ID
         self._openai = AsyncOpenAI(max_retries=0)
         self._client = instructor.from_openai(self._openai)
+        logging.getLogger("instructor").setLevel(logging.CRITICAL)
 
     async def aclose(self) -> None:
         await self._openai.close()
@@ -338,33 +404,52 @@ class LLMClient:
         request_params: dict[str, Any],
     ) -> tuple[T, Any]:
         last_exc: Exception | None = None
-        max_transport_attempts = MAX_TRANSPORT_RETRIES + 1
-        for transport_attempt in range(max_transport_attempts):
+        estimated_tokens = _estimate_request_tokens(messages)
+
+        for attempt in range(1, MAX_REQUEST_ATTEMPTS + 1):
             try:
+                await get_token_bucket().acquire(estimated_tokens)
                 async with self._semaphore:
                     _ensure_budget()
                     return await self._client.chat.completions.create_with_completion(
                         model=self.model,
                         messages=messages,
                         response_model=response_model,
-                        max_retries=MAX_VALIDATION_RETRIES,
+                        max_retries=0,
                         **request_params,
                     )
             except BudgetExceededError:
                 raise
             except Exception as exc:
                 last_exc = exc
-                if _is_validation_error(exc):
-                    message, raw = _format_validation_failure(exc)
-                    raise LLMValidationError(message, raw_output=raw) from exc
-                if transport_attempt >= MAX_TRANSPORT_RETRIES or not (
-                    _is_transport_error(exc) or _is_rate_limited(exc)
-                ):
-                    break
-                await _sleep_with_backoff(transport_attempt, exc)
+                validation_error = _is_validation_error(exc)
+                transport_error = _is_transport_error(exc) or _is_rate_limited(exc)
+                retryable = validation_error or transport_error
+                if not retryable or attempt >= MAX_REQUEST_ATTEMPTS:
+                    if validation_error:
+                        message, raw = _format_validation_failure(exc)
+                        raise LLMValidationError(message, raw_output=raw) from exc
+                    raise LLMTransportExhaustedError(
+                        f"LLM transport request failed after {attempt} attempt(s)",
+                        attempts=attempt,
+                        cause=exc,
+                    ) from exc
 
-        raise RuntimeError(
-            f"LLM transport request failed after {max_transport_attempts} attempts",
+                error_kind = "validation" if validation_error else "transport"
+                logger.warning(
+                    "LLM attempt %d/%d failed (%s): %s",
+                    attempt,
+                    MAX_REQUEST_ATTEMPTS,
+                    error_kind,
+                    _root_cause(exc),
+                )
+                if transport_error:
+                    await _sleep_with_backoff(attempt - 1, exc)
+
+        raise LLMTransportExhaustedError(
+            f"LLM request failed after {MAX_REQUEST_ATTEMPTS} attempts",
+            attempts=MAX_REQUEST_ATTEMPTS,
+            cause=last_exc,
         ) from last_exc
 
     async def complete(
@@ -463,11 +548,10 @@ class LLMClient:
                     ),
                 },
             ]
-            retry_params = {**params, "use_cache": False}
             result = await self.complete(
                 response_model=response_model,
                 messages=retry_messages,
-                **retry_params,
+                **params,
             )
             payload = result.model_dump(mode="python")
             apply_quote_verification_with_retry(
