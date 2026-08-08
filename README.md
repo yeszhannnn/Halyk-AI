@@ -1,4 +1,4 @@
-# Covenant Agent
+ # Halyk AI Covenant Agent
 
 ![Python](https://img.shields.io/badge/python-3.11-blue.svg)
 ![Halyk AI Challenge](https://img.shields.io/badge/Halyk%20AI%20Challenge-2026-lightgrey)
@@ -186,48 +186,6 @@ with eight empty legs is not, regardless of what the submission looks like.
 
 ---
 
-## What the case is actually testing
-
-The dataset is constructed so that computing directly from the ledger produces confident
-wrong answers for most borrowers. Reading it closely, three things stand out.
-
-**The answer format is a regulator exam.** Verdict, figure, transaction — that is
-exactly what an examiner asks for when they pick a borrower at random and ask the bank
-to walk the last covenant cycle: what was decided, what number supports it, which
-transaction proves it. A system that produces the verdict but cannot produce the
-transaction has not solved the problem the format describes.
-
-**The traps are not puzzles; they are the real failure modes.** Superseded contract
-editions that differ by period rather than by threshold. Auditor reclassifications that
-move an amount between line items and so change both sides of a ratio. Obligations
-disclosed in prose and never posted. A working paper that reads authoritatively and
-declares in its own text that it carries no verified figures. Each of these is a way
-covenant monitoring actually goes wrong in a bank, compressed into a synthetic archive.
-
-**Clause numbering carries no meaning.** The same paragraph number is a different
-covenant for each borrower — interest coverage for one, capital intensity for another,
-a springing leverage test for a third. Nothing can be keyed on the slot; each contract
-has to be read. The same applies to thresholds, which are stated per borrower, including
-the ownership percentage above which a counterparty becomes a related party. Near-miss
-entities sit deliberately just below that line, and in one case the entity below the
-threshold transacts ten times more than the one above it, so a single misclassification
-does not degrade the answer — it inverts it.
-
-Two details reward reading the documents rather than the data. Related-party payments
-appear as ordinary consulting fees; the only signal is counterparty identity from the
-compliance dossier, and no amount of description parsing recovers it. And the verdict is
-decided on the unrounded value while the reported figure is rounded — two cells share a
-threshold and a rounded actual yet have opposite verdicts, which is only reproducible if
-the comparison happens before the rounding.
-
-The evidence field encodes a further distinction worth stating: the transaction that
-proves a breach is the one whose reclassification, inclusion or exclusion changes the
-verdict — not the largest contributor, and not the row that happened to carry a running
-total past the limit. That is a counterfactual test, and it is implemented as one:
-remove each candidate row, recompute, and keep the row whose removal flips the answer.
-
----
-
 ## Results
 
 Measured on the public dataset against the provided answer key.
@@ -342,6 +300,48 @@ command shown above against the competition dataset. No answer was obtained from
 interactive agent and none was entered by hand. The run manifest records the git SHA,
 dataset hash and model versions, so any submission can be reproduced and checked against
 the code that generated it.
+
+---
+
+## What the case is actually testing
+
+The dataset is constructed so that computing directly from the ledger produces confident
+wrong answers for most borrowers. Reading it closely, three things stand out.
+
+**The answer format is a regulator exam.** Verdict, figure, transaction — that is
+exactly what an examiner asks for when they pick a borrower at random and ask the bank
+to walk the last covenant cycle: what was decided, what number supports it, which
+transaction proves it. A system that produces the verdict but cannot produce the
+transaction has not solved the problem the format describes.
+
+**The traps are not puzzles; they are the real failure modes.** Superseded contract
+editions that differ by period rather than by threshold. Auditor reclassifications that
+move an amount between line items and so change both sides of a ratio. Obligations
+disclosed in prose and never posted. A working paper that reads authoritatively and
+declares in its own text that it carries no verified figures. Each of these is a way
+covenant monitoring actually goes wrong in a bank, compressed into a synthetic archive.
+
+**Clause numbering carries no meaning.** The same paragraph number is a different
+covenant for each borrower — interest coverage for one, capital intensity for another,
+a springing leverage test for a third. Nothing can be keyed on the slot; each contract
+has to be read. The same applies to thresholds, which are stated per borrower, including
+the ownership percentage above which a counterparty becomes a related party. Near-miss
+entities sit deliberately just below that line, and in one case the entity below the
+threshold transacts ten times more than the one above it, so a single misclassification
+does not degrade the answer — it inverts it.
+
+Two details reward reading the documents rather than the data. Related-party payments
+appear as ordinary consulting fees; the only signal is counterparty identity from the
+compliance dossier, and no amount of description parsing recovers it. And the verdict is
+decided on the unrounded value while the reported figure is rounded — two cells share a
+threshold and a rounded actual yet have opposite verdicts, which is only reproducible if
+the comparison happens before the rounding.
+
+The evidence field encodes a further distinction worth stating: the transaction that
+proves a breach is the one whose reclassification, inclusion or exclusion changes the
+verdict — not the largest contributor, and not the row that happened to carry a running
+total past the limit. That is a counterfactual test, and it is implemented as one:
+remove each candidate row, recompute, and keep the row whose removal flips the answer.
 
 ---
 
