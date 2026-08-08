@@ -659,13 +659,16 @@ class LLMClient:
             retried=False,
         )
         if should_retry:
+            system_message = messages[0]
+            original_user = messages[1]
+            original_content = original_user["content"]
             retry_messages = [
-                *messages,
+                system_message,
                 {
                     "role": "user",
                     "content": (
-                        "Some quoted fields were not verbatim substrings of the source page. "
-                        f"Fix these fields with exact quotes: {', '.join(failed)}"
+                        f"{original_content}\n\n"
+                        f"Fix verbatim quotes for: {', '.join(failed)}"
                     ),
                 },
             ]

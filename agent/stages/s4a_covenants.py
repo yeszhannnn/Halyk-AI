@@ -16,9 +16,10 @@ from agent.llm.extraction_vote import EXTRACTION_UNSTABLE
 from agent.llm.schemas.covenants import (
     CategorySpecExtract,
     CovenantExtract,
-    CovenantExtractBase,
-    CovenantExtractNoSpringing,
-    CovenantExtractWithSpringing,
+    CovenantFlatNoSpringing,
+    CovenantFlatWithSpringing,
+    CovenantMetricExtract,
+    CovenantMetricWithSpringing,
     LEDGER_CATEGORIES_CONTEXT_KEY,
     MetricKind,
     MetricSpecExtract,
@@ -87,9 +88,25 @@ SYSTEM_PROMPT = """You extract bank loan financial covenants from Russian/Englis
 Rules:
 - Return only information explicitly stated in the provided clause text.
 - Every scalar field must have a matching *_quote field: a verbatim substring copied from the clause.
+- Quotes must be exact contiguous substrings from the clause; do not paraphrase or normalize numbers.
+"""
+
+FLAT_SYSTEM_PROMPT = (
+    SYSTEM_PROMPT
+    + """
 - direction must be MAX or MIN based on comparison language in the clause (не допускать превышения → MAX;
   не менее / not fall below / обеспечить не ниже → MIN). Never infer direction from the title alone.
 - threshold_unit is USD for dollar amounts, RATIO for multipliers like 0.04x or 1.20x.
+- period_start and period_end must reflect the measurement period stated in the clause.
+  Most covenants use 2025-01-01 through 2025-12-31; some specify a sub-period (e.g. fourth quarter).
+- When a springing trigger is expected, extract only the trigger operator, value, and condition quote.
+  Do not extract the nested springing metric in this step.
+"""
+)
+
+METRIC_SYSTEM_PROMPT = (
+    SYSTEM_PROMPT
+    + """
 - metric.scope is BORROWER unless the clause explicitly uses group/consolidated/Группы scope.
 - For metric.kind RATIO: provide numerator and denominator category legs.
 - In a ratio expressing a share, the denominator is the whole and the numerator a
@@ -104,10 +121,13 @@ Rules:
   use ledger categories: leave include_keywords empty and quote the related-party clause text
   in include_keywords_quote. Counterparty filtering is resolved from stage 4b.
 - Cash-flow sign is derived from category type in code; do not output sign fields.
-- period_start and period_end must reflect the measurement period stated in the clause.
-  Most covenants use 2025-01-01 through 2025-12-31; some specify a sub-period (e.g. fourth quarter).
-- Quotes must be exact contiguous substrings from the clause; do not paraphrase or normalize numbers.
+- notes must capture the full verbatim formulation of how the metric is computed.
+- Use only the provided clause text; do not borrow category legs or formulations from
+  other covenants in the same borrower agreement (e.g. a revenue-coverage ratio must
+  not reuse a related-party payment numerator from a sibling clause).
+- When a springing trigger is expected, also extract springing_metric for the nested trigger metric.
 """
+)
 
 SPRINGING_TRIGGER_PHRASES: tuple[tuple[str, str], ...] = (
     ("применяется только если", "ru_applies_only_if"),
@@ -188,12 +208,184 @@ def _metric_category_legs(metric: MetricSpecExtract | Any) -> list[tuple[str, An
 
 
 def _to_covenant_extract(
-    raw: CovenantExtractBase,
-    springing: SpringingConditionExtract | None,
+    flat: CovenantFlatNoSpringing | CovenantFlatWithSpringing,
+    metric: CovenantMetricExtract | CovenantMetricWithSpringing,
+    *,
+    expect_springing: bool,
 ) -> CovenantExtract:
-    data = raw.model_dump(mode="python")
-    data["springing"] = springing
+    data = flat.model_dump(mode="python")
+    data.update(
+        {
+            "metric": metric.metric,
+            "notes": metric.notes,
+            "notes_quote": metric.notes_quote,
+            "springing": None,
+        },
+    )
+    if expect_springing:
+        flat_springing = flat
+        assert isinstance(flat_springing, CovenantFlatWithSpringing)
+        assert isinstance(metric, CovenantMetricWithSpringing)
+        if flat_springing.springing_value is not None:
+            data["springing"] = {
+                "metric": metric.springing_metric,
+                "operator": flat_springing.springing_operator,
+                "operator_quote": flat_springing.springing_operator_quote,
+                "value": flat_springing.springing_value,
+                "value_quote": flat_springing.springing_value_quote,
+                "condition_quote": flat_springing.springing_condition_quote,
+            }
     return CovenantExtract.model_validate(data)
+
+
+def _retry_line_from_error(message: str) -> str:
+    lowered = message.casefold()
+    if "metric" in lowered and "object" in lowered:
+        return "metric was missing."
+    if "include_keywords" in lowered:
+        return "metric category include_keywords must use ledger slugs from the prompt."
+    if "numerator" in lowered and "denominator" in lowered:
+        return "metric numerator and denominator are required for RATIO."
+    if "THRESHOLD_NOT_IN_CLAUSE" in message:
+        return message
+    first_line = message.split("\n", 1)[0].strip()
+    if len(first_line) > 120:
+        return first_line[:120]
+    return first_line
+
+
+def _append_retry_line(content: str, retry_line: str | None) -> str:
+    if not retry_line:
+        return content
+    return f"{content}\n\nRetry: {retry_line}"
+
+
+def _flat_quote_checks(
+    result: CovenantFlatNoSpringing | CovenantFlatWithSpringing,
+    verification_text: str,
+    *,
+    expect_springing: bool,
+) -> list[tuple[str, str, str]]:
+    checks: list[tuple[str, str, str]] = [
+        ("title", result.title_quote, verification_text),
+        ("direction", result.direction_quote, verification_text),
+        ("threshold", result.threshold_quote, verification_text),
+        ("threshold_unit", result.threshold_unit_quote, verification_text),
+        ("period", result.period_quote, verification_text),
+    ]
+    if expect_springing and isinstance(result, CovenantFlatWithSpringing):
+        checks.extend(
+            [
+                ("springing_operator", result.springing_operator_quote, verification_text),
+                ("springing_value", result.springing_value_quote, verification_text),
+                ("springing_condition", result.springing_condition_quote, verification_text),
+            ],
+        )
+    return checks
+
+
+def _metric_quote_checks(
+    result: CovenantMetricExtract | CovenantMetricWithSpringing,
+    verification_text: str,
+    *,
+    expect_springing: bool,
+) -> list[tuple[str, str, str]]:
+    checks: list[tuple[str, str, str]] = [
+        ("metric_kind", result.metric.kind_quote, verification_text),
+        ("metric_scope", result.metric.scope_quote, verification_text),
+        ("metric_notes", result.notes_quote, verification_text),
+    ]
+    for leg, category in _metric_category_legs(result.metric):
+        checks.extend(
+            [
+                (
+                    f"metric_{leg}_include",
+                    category.include_keywords_quote,
+                    verification_text,
+                ),
+                (
+                    f"metric_{leg}_reclass",
+                    category.apply_reclass_quote,
+                    verification_text,
+                ),
+            ],
+        )
+        if category.exclude_keywords_quote:
+            checks.append(
+                (
+                    f"metric_{leg}_exclude",
+                    category.exclude_keywords_quote,
+                    verification_text,
+                ),
+            )
+    if expect_springing and isinstance(result, CovenantMetricWithSpringing):
+        checks.extend(
+            [
+                ("springing_metric_kind", result.springing_metric.kind_quote, verification_text),
+                ("springing_metric_scope", result.springing_metric.scope_quote, verification_text),
+            ],
+        )
+        primary = _metric_primary_category(result.springing_metric)
+        checks.append(
+            (
+                "springing_metric_category_include",
+                primary.include_keywords_quote,
+                verification_text,
+            ),
+        )
+    return checks
+
+
+def _format_flat_context(
+    flat: CovenantFlatNoSpringing | CovenantFlatWithSpringing,
+) -> str:
+    return (
+        f"title={flat.title!r}, direction={flat.direction.value}, "
+        f"threshold={_decimal_to_str(flat.threshold)} {flat.threshold_unit.value}, "
+        f"period={flat.period_start.isoformat()}..{flat.period_end.isoformat()}"
+    )
+
+
+async def _extract_voted_part(
+    client: LLMClient,
+    *,
+    response_model: type[Any],
+    build_user_content: Any,
+    quote_checks: Any,
+    validation_context: dict[str, Any] | None,
+    system_prompt: str,
+    context: dict[str, Any],
+    use_cache: bool,
+    retry_line: str | None = None,
+) -> tuple[Any, list[dict[str, Any]], int]:
+    unstable_fields: list[dict[str, Any]] = []
+    current_retry = retry_line
+    for attempt in range(1, MAX_EXTRACTION_ATTEMPTS + 1):
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": _append_retry_line(build_user_content(), current_retry),
+            },
+        ]
+        try:
+            raw, pass_unstable = await client.complete_verified_voted(
+                response_model=response_model,
+                messages=messages,
+                quote_checks=quote_checks,
+                validation_context=validation_context,
+                context=context,
+                use_cache=use_cache,
+            )
+            unstable_fields.extend(pass_unstable)
+            return raw, unstable_fields, attempt
+        except LLMValidationError as exc:
+            if ABSENT_SENTINEL_MESSAGE in str(exc):
+                raise
+            if attempt >= MAX_EXTRACTION_ATTEMPTS:
+                raise
+            current_retry = _retry_line_from_error(str(exc))
+    raise RuntimeError("extraction part returned no result")
 
 
 def _normalize_threshold_number(raw: str) -> Decimal:
@@ -651,11 +843,13 @@ def _validate_category_spec(
     issues: list[dict[str, Any]] = []
     related_party_leg = (
         leg in {"primary", "numerator", "category"}
-        and covenant is not None
         and (
-            _text_refers_to_related_parties(covenant.title)
-            or _text_refers_to_related_parties(covenant.notes)
-            or _text_refers_to_related_parties(spec.include_keywords_quote)
+            _text_refers_to_related_parties(spec.include_keywords_quote)
+            or (
+                not spec.include_keywords
+                and covenant is not None
+                and _text_refers_to_related_parties(covenant.title)
+            )
         )
     )
     if related_party_leg:
@@ -869,14 +1063,16 @@ async def _extract_covenant_item(
     item_text: str,
     verification_text: str,
     ledger_categories: list[str],
-    validation_feedback: str | None = None,
     threshold_candidates: list[tuple[Decimal, str]] | None = None,
     expect_springing: bool | None = None,
-) -> tuple[CovenantExtract, dict[str, bool], list[dict[str, Any]]]:
+) -> tuple[CovenantExtract, dict[str, bool], list[dict[str, Any]], bool]:
     unstable_fields: list[dict[str, Any]] = []
     candidates = threshold_candidates or _extract_threshold_candidates(item_text)
-    feedback = validation_feedback
     active_candidates = threshold_candidates
+    flat_retry: str | None = None
+    metric_retry: str | None = None
+    flat_attempts = 0
+    metric_attempts = 0
     extracted: CovenantExtract | None = None
 
     if expect_springing is None:
@@ -886,88 +1082,131 @@ async def _extract_covenant_item(
             label, phrase = trigger
             _log_springing_trigger(scenario_id, slot, label, phrase)
 
-    response_model: type[CovenantExtractBase] = (
-        CovenantExtractWithSpringing if expect_springing else CovenantExtractNoSpringing
-    )
+    flat_model = CovenantFlatWithSpringing if expect_springing else CovenantFlatNoSpringing
+    metric_model = CovenantMetricWithSpringing if expect_springing else CovenantMetricExtract
     category_list = ", ".join(sorted(ledger_categories))
     validation_context = {LEDGER_CATEGORIES_CONTEXT_KEY: ledger_categories}
+    vote_context = {"scenario_id": scenario_id, "slot": f"6.{slot}"}
+    use_cache = active_candidates is None
 
-    for attempt in range(1, MAX_EXTRACTION_ATTEMPTS + 1):
-        user_content = (
+    flat: CovenantFlatNoSpringing | CovenantFlatWithSpringing | None = None
+    metric: CovenantMetricExtract | CovenantMetricWithSpringing | None = None
+
+    def build_flat_content() -> str:
+        content = (
             f"Scenario: {scenario_id}\n"
             f"Slot: 6.{slot}\n\n"
-            f"Ledger categories (include_keywords must be chosen only from this list): "
-            f"{category_list}\n\n"
-            "Extract the covenant from this clause text:\n\n"
-            f"{item_text}"
+            "Extract the covenant header (title, direction, threshold, unit, period"
         )
+        if expect_springing:
+            content += ", and springing trigger operator/value/condition"
+        content += ") from this clause text:\n\n" + item_text
         if active_candidates:
-            user_content += (
+            content += (
                 "\n\nThe threshold must be exactly one of these values found in the clause: "
                 f"{_format_threshold_candidates(active_candidates)}."
             )
-        if feedback:
-            user_content += (
-                "\n\nYour prior extraction failed structural validation:\n"
-                f"{feedback}\n"
-                "Return a corrected extraction. Do not swap the covenant threshold with "
-                "the springing trigger value."
-            )
-            if expect_springing:
-                user_content += (
-                    " If springing is present, include operator, value, operator_quote, "
-                    "value_quote, and condition_quote."
-                )
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
-        ]
-        try:
-            raw, pass_unstable = await client.complete_verified_voted(
-                response_model=response_model,
-                messages=messages,
-                quote_checks=lambda result: _quote_checks(
-                    _to_covenant_extract(
+        return content
+
+    def build_metric_content() -> str:
+        assert flat is not None
+        return (
+            f"Scenario: {scenario_id}\n"
+            f"Slot: 6.{slot}\n\n"
+            f"Already extracted covenant header:\n{_format_flat_context(flat)}\n\n"
+            f"Ledger categories (include_keywords must be chosen only from this list): "
+            f"{category_list}\n\n"
+            "Extract only the metric definition"
+            + (" and springing_metric" if expect_springing else "")
+            + " from this clause text:\n\n"
+            + item_text
+        )
+
+    outer_attempt = 0
+    for outer_attempt in range(1, MAX_EXTRACTION_ATTEMPTS + 1):
+        if flat is None or flat_retry is not None:
+            try:
+                flat, flat_unstable, flat_attempts = await _extract_voted_part(
+                    client,
+                    response_model=flat_model,
+                    build_user_content=build_flat_content,
+                    quote_checks=lambda result: _flat_quote_checks(
                         result,
-                        springing=result.springing if expect_springing else None,
+                        verification_text,
+                        expect_springing=expect_springing,
                     ),
-                    verification_text,
-                ),
-                validation_context=validation_context,
-                context={"scenario_id": scenario_id, "slot": f"6.{slot}"},
-                **({"use_cache": False} if active_candidates else {}),
-            )
-            unstable_fields.extend(pass_unstable)
-            extracted = _to_covenant_extract(
-                raw,
-                springing=raw.springing if expect_springing else None,
-            )
-        except LLMTransportExhaustedError as exc:
-            _raise_extraction_failure(
-                scenario_id=scenario_id,
-                slot=slot,
-                message=str(exc),
-                cause=exc,
-            )
-        except LLMValidationError as exc:
-            # A sentinel for a required field is a definitive absence signal;
-            # re-asking the model cannot produce a number that is not there.
-            if ABSENT_SENTINEL_MESSAGE in str(exc):
+                    validation_context=None,
+                    system_prompt=FLAT_SYSTEM_PROMPT,
+                    context={**vote_context, "part": "flat"},
+                    use_cache=use_cache,
+                    retry_line=flat_retry,
+                )
+                unstable_fields.extend(flat_unstable)
+                flat_retry = None
+            except LLMTransportExhaustedError as exc:
                 _raise_extraction_failure(
                     scenario_id=scenario_id,
                     slot=slot,
                     message=str(exc),
                     cause=exc,
                 )
-            if attempt >= MAX_EXTRACTION_ATTEMPTS:
+            except LLMValidationError as exc:
+                if ABSENT_SENTINEL_MESSAGE in str(exc):
+                    _raise_extraction_failure(
+                        scenario_id=scenario_id,
+                        slot=slot,
+                        message=str(exc),
+                        cause=exc,
+                    )
                 _raise_extraction_failure(
                     scenario_id=scenario_id,
                     slot=slot,
                     message=str(exc),
                     cause=exc,
                 )
-            feedback = str(exc)
-            continue
+
+        if metric is None or metric_retry is not None:
+            try:
+                metric, metric_unstable, metric_attempts = await _extract_voted_part(
+                    client,
+                    response_model=metric_model,
+                    build_user_content=build_metric_content,
+                    quote_checks=lambda result: _metric_quote_checks(
+                        result,
+                        verification_text,
+                        expect_springing=expect_springing,
+                    ),
+                    validation_context=validation_context,
+                    system_prompt=METRIC_SYSTEM_PROMPT,
+                    context={**vote_context, "part": "metric"},
+                    use_cache=use_cache,
+                    retry_line=metric_retry,
+                )
+                unstable_fields.extend(metric_unstable)
+                metric_retry = None
+            except LLMTransportExhaustedError as exc:
+                _raise_extraction_failure(
+                    scenario_id=scenario_id,
+                    slot=slot,
+                    message=str(exc),
+                    cause=exc,
+                )
+            except LLMValidationError as exc:
+                if ABSENT_SENTINEL_MESSAGE in str(exc):
+                    _raise_extraction_failure(
+                        scenario_id=scenario_id,
+                        slot=slot,
+                        message=str(exc),
+                        cause=exc,
+                    )
+                _raise_extraction_failure(
+                    scenario_id=scenario_id,
+                    slot=slot,
+                    message=str(exc),
+                    cause=exc,
+                )
+
+        extracted = _to_covenant_extract(flat, metric, expect_springing=expect_springing)
 
         if llm_client.REPLAY_DIR is not None:
             break
@@ -984,29 +1223,32 @@ async def _extract_covenant_item(
             if issue.get("kind") == "INVALID_LEDGER_CATEGORY"
         ]
         if invalid_categories:
-            if attempt >= MAX_EXTRACTION_ATTEMPTS:
+            if outer_attempt >= MAX_EXTRACTION_ATTEMPTS:
                 break
-            feedback = (
-                "Category include_keywords must use ledger category slugs from "
+            metric_retry = (
+                "metric category include_keywords must use ledger category slugs from "
                 f"{sorted(ledger_categories)}; invalid: "
                 f"{invalid_categories[0].get('invalid_categories')}"
             )
+            metric = None
             continue
 
         anchor_issue = _threshold_anchor_issue(extracted, candidates)
         if anchor_issue is None:
             break
-        if attempt >= MAX_EXTRACTION_ATTEMPTS:
+        if outer_attempt >= MAX_EXTRACTION_ATTEMPTS:
             _raise_extraction_failure(
                 scenario_id=scenario_id,
                 slot=slot,
                 message=anchor_issue,
             )
-        feedback = anchor_issue
+        flat_retry = anchor_issue
+        flat = None
         active_candidates = _filter_threshold_candidates_by_unit(
             candidates,
             extracted.threshold_unit.value,
         ) or candidates
+        use_cache = False
 
     if extracted is None:
         _raise_extraction_failure(
@@ -1018,7 +1260,8 @@ async def _extract_covenant_item(
     payload = extracted.model_dump(mode="python")
     verify_extracted_fields(payload, fields=_quote_checks(extracted, verification_text))
     verification = _collect_verification_flags(payload)
-    return extracted, verification, unstable_fields
+    needed_retry = outer_attempt > 1 or flat_attempts > 1 or metric_attempts > 1
+    return extracted, verification, unstable_fields, needed_retry
 
 
 async def _process_scenario(
@@ -1029,16 +1272,17 @@ async def _process_scenario(
     pages: list[str],
     ledger_categories: list[str],
     conflicts: list[dict[str, Any]],
-) -> list[tuple[Covenant, dict[str, bool], list[dict[str, Any]], str | None]]:
+) -> tuple[list[tuple[Covenant, dict[str, bool], list[dict[str, Any]], str | None]], int]:
     section = _extract_article_6(pages)
     items = _split_punkts(section)
-    results: list[tuple[Covenant, dict[str, bool], list[dict[str, Any]]]] = []
+    results: list[tuple[Covenant, dict[str, bool], list[dict[str, Any]], str | None]] = []
+    retry_clause_count = 0
 
     for slot in SLOTS:
         item_text = items[slot]
         fallback_page, _, _ = _page_span_for_text(pages, item_text[:120])
         with capture_absent_values() as absent_fields:
-            extracted, verification, unstable_fields = await _extract_covenant_item(
+            extracted, verification, unstable_fields, needed_retry = await _extract_covenant_item(
                 client,
                 scenario_id=scenario_id,
                 slot=slot,
@@ -1046,6 +1290,8 @@ async def _process_scenario(
                 verification_text=item_text,
                 ledger_categories=ledger_categories,
             )
+        if needed_retry:
+            retry_clause_count += 1
         conflicts.extend(unstable_fields)
         for field_name in absent_fields:
             conflicts.append(
@@ -1086,7 +1332,7 @@ async def _process_scenario(
         )
         results.append((covenant, verification, validation_issues, denominator_shape))
 
-    return results
+    return results, retry_clause_count
 
 
 async def _run_async(work_dir: Path) -> StageResult:
@@ -1102,6 +1348,8 @@ async def _run_async(work_dir: Path) -> StageResult:
         scenarios = bound["scenarios"]
         extracted_by_scenario: dict[str, dict[str, tuple[Covenant, dict[str, bool], str | None]]] = {}
 
+        retry_clause_count = 0
+
         for scenario_id in sorted({scenario for scenario, _slot in template_cells(template)}):
             loan_doc_id = scenarios.get(scenario_id, {}).get("loan")
             if not loan_doc_id:
@@ -1110,7 +1358,7 @@ async def _run_async(work_dir: Path) -> StageResult:
                 continue
             pages = inventory["documents"][loan_doc_id]["pages"]
             scenario_categories = categories_by_scenario.get(scenario_id) or global_categories
-            scenario_results = await _process_scenario(
+            scenario_results, scenario_retries = await _process_scenario(
                 client,
                 scenario_id=scenario_id,
                 doc_id=loan_doc_id,
@@ -1118,6 +1366,7 @@ async def _run_async(work_dir: Path) -> StageResult:
                 ledger_categories=scenario_categories,
                 conflicts=conflicts,
             )
+            retry_clause_count += scenario_retries
             extracted_by_scenario[scenario_id] = {
                 covenant.slot: (covenant, verification, denominator_shape)
                 for covenant, verification, _issues, denominator_shape in scenario_results
@@ -1208,6 +1457,7 @@ async def _run_async(work_dir: Path) -> StageResult:
             "springing_count": springing_count,
             "slot_6_2_directions": sorted(slot_62_directions),
             "unstable_field_count": unstable_field_count,
+            "retry_clause_count": retry_clause_count,
         },
     }
 
@@ -1220,13 +1470,14 @@ async def _run_async(work_dir: Path) -> StageResult:
     print(
         f"s4a_covenants: extracted={len(serialized)} springing={springing_count} "
         f"6.2_directions={sorted(slot_62_directions)} conflicts={len(conflicts)} "
-        f"unstable_fields={unstable_field_count}",
+        f"unstable_fields={unstable_field_count} retry_clauses={retry_clause_count}",
     )
 
     return StageResult(
         item_count=len(serialized),
         row_count=springing_count,
         unstable_field_count=unstable_field_count,
+        retry_clause_count=retry_clause_count,
     )
 
 

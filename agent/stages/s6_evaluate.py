@@ -19,6 +19,7 @@ from agent.metrics.engine import (
     EMPTY_LEG,
     FLOOR_MISSING_REVIEW,
     IDENTICAL_LEGS,
+    LEG_SIGN_CONTRADICTION,
     ZERO_DENOMINATOR,
     _requires_related_party_filter,
 )
@@ -72,7 +73,9 @@ def _evaluate_cell(
         finding["flags"] = ["DEGRADED"]
         return finding
 
-    if _requires_related_party_filter(covenant) and (
+    if _requires_related_party_filter(covenant) and not (
+        covenant.get("metric", {}).get("numerator", {}).get("include_keywords")
+    ) and (
         parties is None or parties.get("threshold_pct") is None
     ):
         # No relatedness threshold was extracted for this scenario; the
@@ -123,6 +126,11 @@ def _evaluate_cell(
             computed = False
             status = SLOT_STATUS_PRIOR.get(slot, "COMPLIANT")
             strategy = "identical_legs_slot_prior"
+            actual = Decimal("0")
+        elif LEG_SIGN_CONTRADICTION in flags:
+            computed = False
+            status = SLOT_STATUS_PRIOR.get(slot, "COMPLIANT")
+            strategy = "leg_sign_contradiction_slot_prior"
             actual = Decimal("0")
         elif metric_metadata.get("strategy"):
             strategy = str(metric_metadata["strategy"])

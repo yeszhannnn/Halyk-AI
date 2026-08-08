@@ -355,6 +355,97 @@ class CovenantExtractWithSpringing(CovenantExtractBase):
     springing: SpringingConditionExtract
 
 
+class CovenantFlatExtractBase(BaseModel):
+    """Header fields for a covenant clause (no metric shape)."""
+
+    title: str
+    title_quote: str = Field(
+        description="Verbatim quote containing the covenant title or heading.",
+    )
+    direction: Direction = Field(
+        description=(
+            "MAX if compliance requires staying at or below the threshold; "
+            "MIN if compliance requires meeting or exceeding the threshold."
+        ),
+    )
+    direction_quote: str = Field(
+        description="Verbatim quote containing the comparison direction language.",
+    )
+    threshold: Decimal
+    threshold_quote: str = Field(
+        description="Verbatim quote containing the numeric threshold.",
+    )
+    threshold_unit: ThresholdUnit
+    threshold_unit_quote: str = Field(
+        description="Verbatim quote showing USD amount or ratio/multiplier unit.",
+    )
+    period_start: date
+    period_end: date
+    period_quote: str = Field(
+        description="Verbatim quote containing the covenant period dates.",
+    )
+
+    @field_validator("direction", "threshold_unit", mode="before")
+    @classmethod
+    def _normalize_enums(cls, value: Any) -> Any:
+        return _uppercase_str(value)
+
+    @field_validator("threshold", mode="before")
+    @classmethod
+    def _parse_threshold(cls, value: Any) -> Any:
+        return normalize_decimal(value, field_name="threshold")
+
+    @field_validator("period_start", "period_end", mode="before")
+    @classmethod
+    def _parse_period_dates(cls, value: Any) -> Any:
+        return _parse_date_field(value, field_name="period")
+
+
+class CovenantFlatNoSpringing(CovenantFlatExtractBase):
+    """Flat covenant header when the clause has no springing trigger phrase."""
+
+
+class CovenantFlatWithSpringing(CovenantFlatExtractBase):
+    springing_operator: Literal[">", "<"]
+    springing_operator_quote: str = Field(
+        description="Verbatim quote containing the springing comparison operator.",
+    )
+    springing_value: Decimal | None = Field(
+        default=None,
+        description="Trigger threshold value; null when the clause states no value.",
+    )
+    springing_value_quote: str = Field(
+        default="",
+        description="Verbatim quote containing the springing trigger threshold value.",
+    )
+    springing_condition_quote: str = Field(
+        description="Verbatim quote for the full springing applicability condition.",
+    )
+
+    @field_validator("springing_value", mode="before")
+    @classmethod
+    def _parse_springing_value(cls, value: Any) -> Any:
+        return normalize_optional_decimal(value, field_name="springing_value")
+
+
+class CovenantMetricExtract(BaseModel):
+    """Metric definition for a covenant clause."""
+
+    metric: MetricSpecExtract
+    notes: str = Field(
+        description="Full verbatim formulation of how the metric is computed.",
+    )
+    notes_quote: str = Field(
+        description="Verbatim quote backing the metric definition (may match notes).",
+    )
+
+
+class CovenantMetricWithSpringing(CovenantMetricExtract):
+    springing_metric: MetricSpecExtract = Field(
+        description="Nested metric for the springing trigger condition.",
+    )
+
+
 class CovenantExtract(CovenantExtractBase):
     springing: SpringingConditionExtract | None = Field(
         default=None,

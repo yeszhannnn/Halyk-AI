@@ -13,6 +13,7 @@ from agent.metrics.engine import (
     FLOOR_MISSING_REVIEW,
     GROUP_FIGURE_NOT_FOUND,
     IDENTICAL_LEGS,
+    LEG_SIGN_CONTRADICTION,
     LEG_SUBTOTAL_MISMATCH,
     SCENARIO_SCOPE_VIOLATION,
     ZERO_DENOMINATOR,
@@ -26,6 +27,7 @@ from agent.metrics.engine import (
     describe_leg_breakdown,
 )
 from agent.metrics.group_figures import resolve_group_figure
+from agent.parsing.numbers import round_half_up
 from scripts.remap_covenant_categories import remap_covenant
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -507,14 +509,112 @@ def test_p3_6_1_financing_to_ebitda_ratio() -> None:
     covenants = json.loads((OPEN / "04a_covenants.json").read_text(encoding="utf-8"))["covenants"]
     covenant = next(c for c in covenants if c["scenario_id"] == "P3" and c["slot"] == "6.1")
     remap_covenant(covenant)
-    actual = compute_covenant_metric(
+    ledger = _p3_ledger_with_fx_opex()
+    adjustments = _adjustments()
+    denominator = describe_leg_breakdown(
         covenant,
-        _p3_ledger_with_fx_opex(),
-        adjustments=_adjustments(),
+        ledger,
+        leg="denominator",
+        adjustments=adjustments,
         work_dir=OPEN,
     )
-    assert actual > Decimal("1.70") - Decimal("0.01")
-    assert actual < Decimal("1.71") + Decimal("0.01")
+    assert denominator.value == Decimal("3175820.12")
+    txn = next(row for row in ledger if row.get("txn_id") == "TXN-P3-0024")
+    assert Decimal(str(txn["amount_usd"])) == Decimal("710945.73")
+    metadata: dict = {}
+    actual = compute_covenant_metric(
+        covenant,
+        ledger,
+        adjustments=adjustments,
+        work_dir=OPEN,
+        metadata=metadata,
+    )
+    assert round_half_up(abs(actual), 6) == Decimal("1.713611")
+    assert round_half_up(abs(actual), 2) == Decimal("1.71")
+
+
+def test_p6_6_2_revenue_numerator_ignores_related_party_notes_bleed() -> None:
+    covenants = json.loads((OPEN / "04a_covenants.json").read_text(encoding="utf-8"))["covenants"]
+    parties = json.loads((OPEN / "04b_parties.json").read_text(encoding="utf-8"))["scenarios"]["P6"]
+    covenant = copy.deepcopy(
+        next(c for c in covenants if c["scenario_id"] == "P6" and c["slot"] == "6.2")
+    )
+    remap_covenant(covenant)
+    covenant["metric"]["notes"] += " Платёж в пользу связанной стороны."
+    covenant["metric"]["denominator"]["include_keywords"] = ["personnel", "utilities"]
+    ledger = _ledger()
+    numerator = describe_leg_breakdown(
+        covenant,
+        ledger,
+        leg="numerator",
+        parties=parties,
+    )
+    denominator = describe_leg_breakdown(
+        covenant,
+        ledger,
+        leg="denominator",
+        parties=parties,
+    )
+    assert numerator.value == Decimal("6918204.37")
+    assert denominator.value == Decimal("-1900867.56")
+    metadata: dict = {}
+    actual = compute_covenant_metric(
+        covenant,
+        ledger,
+        parties=parties,
+        metadata=metadata,
+    )
+    assert LEG_SIGN_CONTRADICTION not in metadata.get("flags", [])
+    assert actual == Decimal("6918204.37") / Decimal("1900867.56")
+
+
+def test_leg_sign_contradiction_flags_revenue_numerator_resolving_to_outflows() -> None:
+    covenant = {
+        "scenario_id": "P6",
+        "slot": "6.2",
+        "title": "Revenue coverage",
+        "period": ["2025-01-01", "2025-12-31"],
+        "metric": {
+            "kind": "RATIO",
+            "scope": "BORROWER",
+            "notes": "revenue must cover payroll and utilities",
+            "numerator": {
+                "include_keywords": ["consulting"],
+                "exclude_keywords": [],
+                "sign": "INFLOW",
+                "apply_reclass": True,
+            },
+            "denominator": {
+                "include_keywords": ["personnel", "utilities"],
+                "exclude_keywords": [],
+                "sign": "OUTFLOW",
+                "apply_reclass": True,
+            },
+        },
+    }
+    ledger = [
+        {
+            "txn_id": "TXN-P6-0040",
+            "scenario_id": "P6",
+            "date": "2025-06-01",
+            "amount_usd": "-418662.44",
+            "category": "consulting",
+            "excluded": False,
+            "counterparty": "Taraz Holding Group LLP",
+        },
+        {
+            "txn_id": "TXN-P6-0031",
+            "scenario_id": "P6",
+            "date": "2025-06-02",
+            "amount_usd": "6918204.37",
+            "category": "revenue",
+            "excluded": False,
+        },
+    ]
+    metadata: dict = {}
+    actual = compute_covenant_metric(covenant, ledger, metadata=metadata)
+    assert actual == Decimal("0")
+    assert LEG_SIGN_CONTRADICTION in metadata.get("flags", [])
 
 
 def test_p4_6_1_mistagged_revenue_numerator_uses_adjusted_ebitda() -> None:

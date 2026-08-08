@@ -98,7 +98,15 @@ def _log_stage(stage_name: str, elapsed_ms: int, result: StageResult) -> None:
         if result.unstable_field_count is not None
         else ""
     )
-    print(f"{stage_name}: {elapsed_ms}ms items={result.item_count}{row_part}{unstable_part}")
+    retry_part = (
+        f" retries={result.retry_clause_count}"
+        if result.retry_clause_count is not None
+        else ""
+    )
+    print(
+        f"{stage_name}: {elapsed_ms}ms items={result.item_count}"
+        f"{row_part}{unstable_part}{retry_part}",
+    )
 
 
 def _past_deadline() -> bool:
@@ -195,6 +203,7 @@ def _run_pipeline(argv: Sequence[str]) -> int:
             "items": result.item_count,
             "rows": result.row_count,
             "unstable_fields": result.unstable_field_count,
+            "retry_clauses": result.retry_clause_count,
         }
         _log_stage(spec.name, elapsed_ms, result)
 

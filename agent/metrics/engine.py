@@ -31,6 +31,7 @@ LEG_SUBTOTAL_MISMATCH = "LEG_SUBTOTAL_MISMATCH"
 ADJUSTMENT_APPLIED_TWICE = "ADJUSTMENT_APPLIED_TWICE"
 IDENTICAL_LEGS = "IDENTICAL_LEGS"
 EBITDA_CONSTRUCTION_FAILED = "EBITDA_CONSTRUCTION_FAILED"
+LEG_SIGN_CONTRADICTION = "LEG_SIGN_CONTRADICTION"
 
 FUNDING_EXCLUSION_MARKERS = (
     "refund",
@@ -267,11 +268,40 @@ def _is_related_party_leg(
     covenant_context: dict[str, Any] | None,
     *,
     leg: str | None,
+    spec: dict[str, Any] | None = None,
 ) -> bool:
-    """Payment legs for related-party covenants filter by counterparty, not category."""
-    if leg != "numerator" or not _requires_related_party_filter(covenant_context):
+    """Payment legs for related-party covenants filter by counterparty, not category.
+
+    Revenue and other inflow numerators always take the category path, even when
+    sibling-clause related-party language bleeds into covenant notes.
+    """
+    if leg != "numerator":
         return False
-    return True
+    if not covenant_context:
+        return False
+    quote = str((spec or {}).get("include_keywords_quote") or "")
+    title = str(covenant_context.get("title") or "")
+    if not (_text_refers_to_related_parties(quote) or _text_refers_to_related_parties(title)):
+        return False
+    include_keywords = [str(keyword) for keyword in (spec or {}).get("include_keywords") or []]
+    if not include_keywords:
+        return True
+    signs = {category_sign(keyword) for keyword in include_keywords}
+    return "INFLOW" not in signs
+
+
+def _leg_sign_contradicts(spec: dict[str, Any], value: Decimal) -> bool:
+    """True when aggregated leg value points the wrong way for its role."""
+    sign = str(spec.get("sign") or "")
+    if not sign:
+        sign = derive_leg_sign([str(keyword) for keyword in spec.get("include_keywords") or []])
+    if not sign or sign == "BOTH" or value == ZERO:
+        return False
+    if sign == "INFLOW":
+        return value < ZERO
+    if sign == "OUTFLOW":
+        return value > ZERO
+    return False
 
 
 def _requires_unrestricted_subsidiary_capex(covenant_context: dict[str, Any] | None) -> bool:
@@ -356,7 +386,7 @@ def _row_matches_spec(
         ):
             return False
 
-    related_party_leg = _is_related_party_leg(covenant_context, leg=leg)
+    related_party_leg = _is_related_party_leg(covenant_context, leg=leg, spec=spec)
     if related_party_leg:
         if amount >= ZERO:
             return False
@@ -871,7 +901,7 @@ def _leg_breakdown(
         _assert_leg_subtotal(breakdown, scenario_id=scenario_id, slot=slot, leg=leg)
         return breakdown
 
-    related_party_leg = _is_related_party_leg(covenant_context, leg=leg)
+    related_party_leg = _is_related_party_leg(covenant_context, leg=leg, spec=spec)
     if not include_keywords and not related_party_leg:
         flags.append(EMPTY_CATEGORY_SPEC)
         breakdown = LegBreakdown(kind="empty", value=ZERO, flags=flags)
@@ -917,6 +947,8 @@ def _leg_breakdown(
     _assert_leg_scenario(rows, scenario_id=scenario_id, leg=leg)
     categories = _leg_categories(rows, spec)
     value = _sum_rows(rows)
+    if _leg_sign_contradicts(spec, value) and LEG_SIGN_CONTRADICTION not in flags:
+        flags.append(LEG_SIGN_CONTRADICTION)
 
     kind = "rows" if rows else "empty"
     if kind == "empty" and (include_keywords or related_party_leg) and EMPTY_LEG not in flags:
@@ -1141,10 +1173,14 @@ def compute_covenant_metric(
         return ZERO
 
     leg_flags = list(numerator_breakdown.flags) + list(denominator_breakdown.flags)
-    if EMPTY_LEG in leg_flags or EBITDA_CONSTRUCTION_FAILED in leg_flags:
+    if (
+        EMPTY_LEG in leg_flags
+        or EBITDA_CONSTRUCTION_FAILED in leg_flags
+        or LEG_SIGN_CONTRADICTION in leg_flags
+    ):
         if metadata is not None:
             flags = metadata.setdefault("flags", [])
-            for flag in (EMPTY_LEG, EBITDA_CONSTRUCTION_FAILED):
+            for flag in (EMPTY_LEG, EBITDA_CONSTRUCTION_FAILED, LEG_SIGN_CONTRADICTION):
                 if flag in leg_flags and flag not in flags:
                     flags.append(flag)
         return ZERO
@@ -1170,7 +1206,7 @@ def _explain_row_match(
     if row.get("synthetic"):
         ref = row.get("adjustment_ref") or "off_ledger"
         return f"off_ledger~{ref}"
-    if _is_related_party_leg(covenant_context, leg=leg):
+    if _is_related_party_leg(covenant_context, leg=leg, spec=spec):
         return f"related_party_outflow counterparty={row.get('counterparty')}"
     for keyword in spec.get("include_keywords") or []:
         if _category_matches(category, [str(keyword)]):

@@ -6,7 +6,7 @@ import json
 import sys
 from pathlib import Path
 
-from agent.parsing.categories import OPEX_SLUGS
+from agent.parsing.categories import OPEX_SLUGS, derive_leg_sign
 
 OUTFLOW_CATEGORIES = sorted(
     {
@@ -46,6 +46,7 @@ KEYWORD_TO_CATEGORIES: dict[str, list[str]] = {
     "расходы на оплату труда": ["personnel"],
     "расходов на оплату труда": ["personnel"],
     "расходы на коммунальные услуги": ["utilities"],
+    "коммуналь": ["utilities"],
     "налоги": ["tax"],
     "платежи": OUTFLOW_CATEGORIES,
     "связанным сторонам": OUTFLOW_CATEGORIES,
@@ -56,12 +57,8 @@ KEYWORD_TO_CATEGORIES: dict[str, list[str]] = {
 
 
 def _map_keywords(keywords: list[str]) -> list[str]:
-    combined = " ".join(str(keyword) for keyword in keywords).casefold()
+    mapped: set[str] = set()
     patterns = sorted(KEYWORD_TO_CATEGORIES.items(), key=lambda item: len(item[0]), reverse=True)
-    for pattern, categories in patterns:
-        if pattern in combined:
-            return list(categories)
-    mapped: list[str] = []
     for keyword in keywords:
         key = str(keyword).casefold().strip()
         if key in {category.casefold() for category in OUTFLOW_CATEGORIES} or key in {
@@ -69,24 +66,24 @@ def _map_keywords(keywords: list[str]) -> list[str]:
             "financing",
             "interest_income",
         }:
-            mapped.append(key)
+            mapped.add(key)
             continue
         hit = KEYWORD_TO_CATEGORIES.get(key)
         if hit:
-            mapped.extend(hit)
+            mapped.update(hit)
             continue
         for pattern, categories in patterns:
             if pattern in key or key in pattern:
-                mapped.extend(categories)
+                mapped.update(categories)
                 break
-    return sorted(set(mapped))
+    return sorted(mapped)
 
 
 def _remap_category(spec: dict) -> None:
     if not spec:
         return
-    spec.pop("sign", None)
     spec["include_keywords"] = _map_keywords(spec.get("include_keywords") or [])
+    spec["sign"] = derive_leg_sign(spec["include_keywords"])
 
 
 def remap_covenant(covenant: dict) -> None:
