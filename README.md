@@ -1,7 +1,6 @@
 # Covenant Agent
 
 ![Python](https://img.shields.io/badge/python-3.11-blue.svg)
-![Inference](https://img.shields.io/badge/inference-temperature%200-informational)
 ![Halyk AI Challenge](https://img.shields.io/badge/Halyk%20AI%20Challenge-2026-lightgrey)
 
 An autonomous agent that reads an archive of corporate loan documents together with a
