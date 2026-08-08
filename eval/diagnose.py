@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
 
 from agent.evidence.quotes import verify_quote
 from agent.metrics.engine import (
+    IDENTICAL_LEGS,
     breaches,
     collect_covenant_inputs,
     compute_covenant_metric,
@@ -670,10 +671,18 @@ def print_cell_breakdown(work_dir: Path, scenario_id: str, slot: str) -> None:
     if kind == "RATIO" and "denominator" in leg_totals:
         numerator = leg_totals.get("numerator", Decimal("0"))
         denominator = leg_totals.get("denominator", Decimal("0"))
-        print(
-            f"  expression: {numerator} / {denominator} = {actual} "
-            f"(metric kind={kind})",
-        )
+        metric_flags = metric_metadata.get("flags") or []
+        if IDENTICAL_LEGS in metric_flags:
+            print(
+                f"  expression: {numerator} / {denominator} "
+                f"→ not evaluated ({IDENTICAL_LEGS}); scored actual = {actual} "
+                f"(metric kind={kind})",
+            )
+        else:
+            print(
+                f"  expression: {numerator} / {denominator} = {actual} "
+                f"(metric kind={kind})",
+            )
     elif kind == "SUM":
         numerator = leg_totals.get("numerator", actual)
         print(f"  expression: sum(numerator) = {numerator} = {actual} (metric kind={kind})")

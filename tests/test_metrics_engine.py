@@ -10,13 +10,18 @@ import pytest
 
 from agent.metrics.engine import (
     EMPTY_CATEGORY_SPEC,
+    FLOOR_MISSING_REVIEW,
     GROUP_FIGURE_NOT_FOUND,
     IDENTICAL_LEGS,
     LEG_SUBTOTAL_MISMATCH,
     SCENARIO_SCOPE_VIOLATION,
+    ZERO_DENOMINATOR,
     _assert_leg_scenario,
     _category_matches,
+    _ebitda_addback_adjustments,
+    _is_ebitda_leg,
     _is_excluded_inflow,
+    _metric_notes,
     compute_covenant_metric,
     describe_leg_breakdown,
 )
@@ -331,6 +336,225 @@ def test_subset_ratio_legs_pass_invariant() -> None:
     covenant = _synthetic_covenant(["capex"], ["capex", "opex"])
     actual = compute_covenant_metric(covenant, _synthetic_ledger())
     assert actual == Decimal("250.00") / Decimal("650.00")
+
+
+def _ebitda_covenant(numerator_keywords: list[str] | None = None) -> dict:
+    covenant = _synthetic_covenant(numerator_keywords or ["revenue", "opex"], None)
+    covenant["metric"]["notes"] = "скорректированная EBITDA"
+    return covenant
+
+
+def _floor_missing_adjustments() -> dict:
+    return {
+        "adj_t1_1": {
+            "id": "adj_t1_1",
+            "kind": "EBITDA_ADDBACK",
+            "scenario_id": "T1",
+            "materiality_floor": None,
+            "rows": [
+                {
+                    "item": "Очистка прибрежного дна",
+                    "counterparty": "Zhailyk Dredging LLP",
+                    "amount": "251338.94",
+                    "above_floor": None,
+                    "matched_txn": None,
+                },
+                {
+                    "item": "Урегулирование спора",
+                    "counterparty": "Aral Freight",
+                    "amount": "342905.28",
+                    "above_floor": None,
+                    "matched_txn": "TXN-T1-0023",
+                },
+                {
+                    "item": "Устранение последствий паводка",
+                    "counterparty": "Ilek Restoration",
+                    "amount": "481247.63",
+                    "above_floor": None,
+                    "matched_txn": "TXN-T1-0025",
+                },
+            ],
+        },
+    }
+
+
+def test_ebitda_addback_floor_missing_adds_back_every_listed_row() -> None:
+    items = _ebitda_addback_adjustments(_floor_missing_adjustments(), "T1")
+    assert len(items) == 1
+    adj_id, above_floor, rows, floor_missing = items[0]
+    assert adj_id == "adj_t1_1"
+    assert floor_missing is True
+    assert len(rows) == 3
+    # With no floor, every listed row is added back rather than dropped.
+    assert above_floor == Decimal("251338.94") + Decimal("342905.28") + Decimal("481247.63")
+
+
+def test_ebitda_addback_floor_present_keeps_above_floor_filter() -> None:
+    adjustments = _floor_missing_adjustments()
+    adjustments["adj_t1_1"]["materiality_floor"] = "300000"
+    adjustments["adj_t1_1"]["rows"] = [
+        {**adjustments["adj_t1_1"]["rows"][0], "above_floor": False},
+        {**adjustments["adj_t1_1"]["rows"][1], "above_floor": True},
+        {**adjustments["adj_t1_1"]["rows"][2], "above_floor": True},
+    ]
+    items = _ebitda_addback_adjustments(adjustments, "T1")
+    assert len(items) == 1
+    _adj_id, above_floor, _rows, floor_missing = items[0]
+    assert floor_missing is False
+    assert above_floor == Decimal("342905.28") + Decimal("481247.63")
+
+
+def test_ebitda_addback_floor_missing_flags_cell_for_review() -> None:
+    covenant = _ebitda_covenant()
+    metadata: dict = {}
+    compute_covenant_metric(
+        covenant,
+        _synthetic_ledger(),
+        adjustments=_floor_missing_adjustments(),
+        metadata=metadata,
+    )
+    assert FLOOR_MISSING_REVIEW in metadata.get("flags", [])
+
+
+def test_ebitda_addback_floor_present_does_not_flag_cell() -> None:
+    adjustments = _floor_missing_adjustments()
+    adjustments["adj_t1_1"]["materiality_floor"] = "300000"
+    adjustments["adj_t1_1"]["rows"] = [
+        {**adjustments["adj_t1_1"]["rows"][0], "above_floor": False},
+        {**adjustments["adj_t1_1"]["rows"][1], "above_floor": True},
+        {**adjustments["adj_t1_1"]["rows"][2], "above_floor": True},
+    ]
+    covenant = _ebitda_covenant()
+    metadata: dict = {}
+    compute_covenant_metric(
+        covenant,
+        _synthetic_ledger(),
+        adjustments=adjustments,
+        metadata=metadata,
+    )
+    assert FLOOR_MISSING_REVIEW not in metadata.get("flags", [])
+
+
+def test_zero_denominator_flags_and_skips_ratio() -> None:
+    ledger = [
+        {
+            "txn_id": "TXN-T1-0001",
+            "scenario_id": "T1",
+            "date": "2025-06-01",
+            "amount_usd": "1000.00",
+            "category": "revenue",
+            "excluded": False,
+        },
+        {
+            "txn_id": "TXN-T1-0002",
+            "scenario_id": "T1",
+            "date": "2025-06-02",
+            "amount_usd": "-1000.00",
+            "category": "opex",
+            "excluded": False,
+        },
+    ]
+    covenant = {
+        "scenario_id": "T1",
+        "slot": "6.1",
+        "title": "synthetic",
+        "period": ["2025-01-01", "2025-12-31"],
+        "metric": {
+            "kind": "RATIO",
+            "scope": "BORROWER",
+            "notes": "",
+            "numerator": {
+                "include_keywords": ["revenue"],
+                "exclude_keywords": [],
+                "apply_reclass": True,
+            },
+            "denominator": {
+                "include_keywords": ["revenue", "opex"],
+                "exclude_keywords": [],
+                "apply_reclass": True,
+            },
+        },
+    }
+    metadata: dict = {}
+    actual = compute_covenant_metric(covenant, ledger, metadata=metadata)
+    assert actual == Decimal("0")
+    assert ZERO_DENOMINATOR in metadata.get("flags", [])
+
+
+def _p3_ledger_with_fx_opex() -> list[dict]:
+    return _ledger()
+
+
+def test_remapped_ebitda_denominator_uses_derived_path() -> None:
+    covenants = json.loads((OPEN / "04a_covenants.json").read_text(encoding="utf-8"))["covenants"]
+    covenant = next(c for c in covenants if c["scenario_id"] == "P3" and c["slot"] == "6.1")
+    remap_covenant(covenant)
+    spec = covenant["metric"]["denominator"]
+    notes = _metric_notes(covenant["metric"]["notes"])
+    assert _is_ebitda_leg(spec, notes, leg="denominator")
+    breakdown = describe_leg_breakdown(
+        covenant,
+        _p3_ledger_with_fx_opex(),
+        leg="denominator",
+        adjustments=_adjustments(),
+        work_dir=OPEN,
+    )
+    assert breakdown.kind == "derived"
+    assert breakdown.value == Decimal("3175820.12")
+
+
+def test_p3_6_1_financing_to_ebitda_ratio() -> None:
+    covenants = json.loads((OPEN / "04a_covenants.json").read_text(encoding="utf-8"))["covenants"]
+    covenant = next(c for c in covenants if c["scenario_id"] == "P3" and c["slot"] == "6.1")
+    remap_covenant(covenant)
+    actual = compute_covenant_metric(
+        covenant,
+        _p3_ledger_with_fx_opex(),
+        adjustments=_adjustments(),
+        work_dir=OPEN,
+    )
+    assert actual > Decimal("1.70") - Decimal("0.01")
+    assert actual < Decimal("1.71") + Decimal("0.01")
+
+
+def test_p4_6_1_mistagged_revenue_numerator_uses_adjusted_ebitda() -> None:
+    covenants = json.loads((OPEN / "04a_covenants.json").read_text(encoding="utf-8"))["covenants"]
+    covenant = copy.deepcopy(
+        next(c for c in covenants if c["scenario_id"] == "P4" and c["slot"] == "6.1")
+    )
+    covenant["metric"]["numerator"]["include_keywords"] = ["revenue"]
+    covenant["metric"]["denominator"]["include_keywords"] = ["revenue"]
+    ledger = _ledger()
+    adjustments = _adjustments()
+    numerator = describe_leg_breakdown(
+        covenant,
+        ledger,
+        leg="numerator",
+        adjustments=adjustments,
+        work_dir=OPEN,
+    )
+    denominator = describe_leg_breakdown(
+        covenant,
+        ledger,
+        leg="denominator",
+        adjustments=adjustments,
+        work_dir=OPEN,
+    )
+    assert numerator.kind == "derived"
+    assert numerator.value == Decimal("2321317.34")
+    assert denominator.value == Decimal("7004318.47")
+    metadata: dict = {}
+    actual = compute_covenant_metric(
+        covenant,
+        ledger,
+        adjustments=adjustments,
+        work_dir=OPEN,
+        metadata=metadata,
+    )
+    assert IDENTICAL_LEGS not in metadata.get("flags", [])
+    assert actual == Decimal("2321317.34") / Decimal("7004318.47")
+    assert actual > Decimal("0.33") - Decimal("0.01")
+    assert actual < Decimal("0.33") + Decimal("0.01")
 
 
 def test_fx_normalisation_preserves_sign_and_covers_all_rows() -> None:

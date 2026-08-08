@@ -15,8 +15,11 @@ from agent.metrics.engine import (
     breaches,
     compare_values,
     compute_covenant_metric,
+    EBITDA_CONSTRUCTION_FAILED,
     EMPTY_LEG,
+    FLOOR_MISSING_REVIEW,
     IDENTICAL_LEGS,
+    ZERO_DENOMINATOR,
     _requires_related_party_filter,
 )
 from agent.parsing.numbers import round_half_up
@@ -103,7 +106,17 @@ def _evaluate_cell(
             computed = False
             status = SLOT_STATUS_PRIOR.get(slot, "COMPLIANT")
             strategy = "empty_leg_slot_prior"
-            actual = Decimal("0")
+            actual = threshold
+        elif EBITDA_CONSTRUCTION_FAILED in flags:
+            computed = False
+            status = SLOT_STATUS_PRIOR.get(slot, "COMPLIANT")
+            strategy = "ebitda_construction_slot_prior"
+            actual = threshold
+        elif ZERO_DENOMINATOR in flags:
+            computed = False
+            status = SLOT_STATUS_PRIOR.get(slot, "COMPLIANT")
+            strategy = "zero_denominator_slot_prior"
+            actual = threshold
         elif IDENTICAL_LEGS in flags:
             # Both legs selected the same rows: extraction failure. Degrade
             # this cell through the slot prior and keep evaluating the rest.
@@ -151,7 +164,11 @@ def _evaluate_cell(
             status = SLOT_STATUS_PRIOR.get(slot, "COMPLIANT")
             strategy = "status_slot_prior"
 
-    if not computed and strategy != "empty_leg_slot_prior":
+    if not computed and strategy not in {
+        "empty_leg_slot_prior",
+        "ebitda_construction_slot_prior",
+        "zero_denominator_slot_prior",
+    }:
         actual = threshold if strategy == "actual_threshold_fallback" else Decimal("0")
         if strategy == "status_slot_prior":
             actual = Decimal("0")
@@ -226,7 +243,13 @@ def run(*, work_dir: Path) -> StageResult:
             "slot": finding["slot"],
         }
         for finding in findings
-        for kind in ("ABSENT_RELATEDNESS_THRESHOLD", IDENTICAL_LEGS)
+        for kind in (
+            "ABSENT_RELATEDNESS_THRESHOLD",
+            IDENTICAL_LEGS,
+            FLOOR_MISSING_REVIEW,
+            EBITDA_CONSTRUCTION_FAILED,
+            ZERO_DENOMINATOR,
+        )
         if kind in (finding.get("flags") or [])
     ]
     payload = {

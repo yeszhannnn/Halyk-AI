@@ -9,18 +9,27 @@ from pathlib import Path
 from typing import Any
 
 from agent.metrics.group_figures import resolve_group_figure
-from agent.parsing.categories import INFLOW_CATEGORIES, OPEX_SLUGS, category_sign, derive_leg_sign
+from agent.parsing.categories import (
+    INFLOW_CATEGORIES,
+    OPEX_SLUGS,
+    category_sign,
+    derive_leg_sign,
+    infer_category,
+)
 from agent.stages.s4b_parties import normalize_counterparty
 
 ZERO = Decimal("0")
 EMPTY_CATEGORY_SPEC = "EMPTY_CATEGORY_SPEC"
 EMPTY_LEG = "EMPTY_LEG"
+ZERO_DENOMINATOR = "ZERO_DENOMINATOR"
+FLOOR_MISSING_REVIEW = "FLOOR_MISSING_REVIEW"
 GROUP_FIGURE_NOT_FOUND = "GROUP_FIGURE_NOT_FOUND"
 WIDE_LEG_REVIEW = "WIDE_LEG_REVIEW"
 SCENARIO_SCOPE_VIOLATION = "SCENARIO_SCOPE_VIOLATION"
 LEG_SUBTOTAL_MISMATCH = "LEG_SUBTOTAL_MISMATCH"
 ADJUSTMENT_APPLIED_TWICE = "ADJUSTMENT_APPLIED_TWICE"
 IDENTICAL_LEGS = "IDENTICAL_LEGS"
+EBITDA_CONSTRUCTION_FAILED = "EBITDA_CONSTRUCTION_FAILED"
 
 FUNDING_EXCLUSION_MARKERS = (
     "refund",
@@ -422,24 +431,31 @@ def _sum_rows(rows: list[dict[str, Any]]) -> Decimal:
 def _ebitda_addback_adjustments(
     adjustments: dict[str, Any],
     scenario_id: str,
-) -> list[tuple[str, Decimal, list[dict[str, Any]]]]:
-    """EBITDA add-back tables as (adjustment id, above-floor total, all rows).
+) -> list[tuple[str, Decimal, list[dict[str, Any]], bool]]:
+    """EBITDA add-back tables as (adjustment id, above-floor total, all rows, floor_missing).
 
     Every row is a one-off expense: all of them are subtracted inside opex
     first, and only rows at or above the materiality floor are added back.
+    When the materiality floor sentence was not extracted (materiality_floor
+    is None) every listed row is added back and the cell is flagged for
+    review — losing one field must never discard the whole record.
     """
-    items: list[tuple[str, Decimal, list[dict[str, Any]]]] = []
+    items: list[tuple[str, Decimal, list[dict[str, Any]], bool]] = []
     for adj_id, adj in adjustments.items():
         if adj.get("scenario_id") != scenario_id or adj.get("kind") != "EBITDA_ADDBACK":
             continue
         rows = [row for row in (adj.get("rows") or []) if _d(row.get("amount")) != ZERO]
         if not rows:
             continue
-        above_floor = sum(
-            (_d(row.get("amount")) for row in rows if row.get("above_floor")),
-            ZERO,
-        )
-        items.append((adj_id, above_floor, rows))
+        floor_missing = adj.get("materiality_floor") is None
+        if floor_missing:
+            above_floor = sum((_d(row.get("amount")) for row in rows), ZERO)
+        else:
+            above_floor = sum(
+                (_d(row.get("amount")) for row in rows if row.get("above_floor")),
+                ZERO,
+            )
+        items.append((adj_id, above_floor, rows, floor_missing))
     return items
 
 
@@ -447,7 +463,8 @@ def _addback_total(adjustments: dict[str, Any], scenario_id: str) -> Decimal:
     return sum(
         (
             above_floor
-            for _, above_floor, _rows in _ebitda_addback_adjustments(adjustments, scenario_id)
+            for _, above_floor, _rows, _floor_missing
+            in _ebitda_addback_adjustments(adjustments, scenario_id)
         ),
         ZERO,
     )
@@ -501,6 +518,65 @@ def _assert_leg_subtotal(
         )
 
 
+def _ebitda_revenue_rows(
+    ledger: list[dict[str, Any]],
+    *,
+    period: tuple[date, date],
+    apply_reclass: bool,
+) -> list[dict[str, Any]]:
+    revenue_spec = {
+        "include_keywords": ["revenue"],
+        "exclude_keywords": [],
+        "apply_reclass": apply_reclass,
+    }
+    return _filter_rows(ledger, revenue_spec, period=period, parties=None)
+
+
+def _ebitda_opex_rows(
+    ledger: list[dict[str, Any]],
+    *,
+    period: tuple[date, date],
+    apply_reclass: bool,
+) -> list[dict[str, Any]]:
+    """Operating expenses for EBITDA: opex-category rows plus misclassified outflows.
+
+    FX-normalised foreign-currency rows can still carry category ``other`` when
+    the description maps to an operating-expense slug; include them here so the
+    converted amount reaches the EBITDA denominator.
+    """
+    opex_spec = {
+        "include_keywords": ["opex"],
+        "exclude_keywords": [],
+        "apply_reclass": apply_reclass,
+    }
+    matched = _filter_rows(ledger, opex_spec, period=period, parties=None)
+    seen = {row.get("txn_id") for row in matched}
+    for row in ledger:
+        txn_id = row.get("txn_id")
+        if txn_id in seen:
+            continue
+        if row.get("excluded"):
+            continue
+        if not _in_period(row, period):
+            continue
+        amount = _d(row.get("amount_usd"))
+        if amount == ZERO:
+            continue
+        category = _effective_category(row, apply_reclass)
+        if category != "other":
+            continue
+        inferred = infer_category(str(row.get("description") or ""))
+        if inferred not in OPEX_SLUGS:
+            continue
+        if amount > ZERO and category_sign(inferred) == "OUTFLOW":
+            amount = -abs(amount)
+        if not _sign_ok(amount, category_sign(inferred)):
+            continue
+        matched.append({**row, "amount_usd": str(amount)})
+        seen.add(txn_id)
+    return matched
+
+
 def _compute_ebitda(
     ledger: list[dict[str, Any]],
     *,
@@ -508,18 +584,8 @@ def _compute_ebitda(
     apply_reclass: bool,
     addbacks: Decimal = ZERO,
 ) -> Decimal:
-    revenue_spec = {
-        "include_keywords": ["revenue"],
-        "exclude_keywords": [],
-        "apply_reclass": apply_reclass,
-    }
-    opex_spec = {
-        "include_keywords": ["opex"],
-        "exclude_keywords": [],
-        "apply_reclass": apply_reclass,
-    }
-    revenue = _sum_rows(_filter_rows(ledger, revenue_spec, period=period, parties=None))
-    opex = _sum_rows(_filter_rows(ledger, opex_spec, period=period, parties=None))
+    revenue = _sum_rows(_ebitda_revenue_rows(ledger, period=period, apply_reclass=apply_reclass))
+    opex = _sum_rows(_ebitda_opex_rows(ledger, period=period, apply_reclass=apply_reclass))
     return revenue + opex + addbacks
 
 
@@ -530,13 +596,17 @@ def _metric_notes(notes: str) -> str:
 EBITDA_COMPONENT_SLUGS = frozenset({"revenue", "opex"} | set(OPEX_SLUGS))
 
 
-def _is_ebitda_leg(spec: dict[str, Any], notes: str, *, leg: str) -> bool:
-    """True when the leg itself is defined as EBITDA (revenue minus opex).
+def _is_adjusted_ebitda_notes(notes: str) -> bool:
+    return "скорректированная" in notes or "adjusted" in notes
 
-    The leg's own include_keywords are the primary signal, so an EBITDA
-    denominator is derived while a capex or financing numerator sitting next
-    to EBITDA notes is left alone. Numerator legs whose keywords were remapped
-    to plain revenue/opex slugs still take the derived path.
+
+def _is_ebitda_leg(spec: dict[str, Any], notes: str, *, leg: str) -> bool:
+    """True when the leg must be built as derived EBITDA, never category rows.
+
+    Plain EBITDA is revenue minus opex. Adjusted EBITDA also applies add-backs.
+    The covenant notes and leg role decide which applies; mis-tagged revenue
+    slugs on an EBITDA numerator still take the derived path so the leg cannot
+    collapse onto a plain revenue denominator.
     """
     if "ebitda" not in notes:
         return False
@@ -544,11 +614,20 @@ def _is_ebitda_leg(spec: dict[str, Any], notes: str, *, leg: str) -> bool:
     keyword_text = " ".join(sorted(include_keywords))
     if "capex" in keyword_text or "капитал" in keyword_text:
         return False
+    if "financing" in include_keywords:
+        return False
     if "ebitda" in keyword_text:
         return True
-    if leg != "numerator":
+    # Remapped EBITDA vocabulary is exactly revenue plus the opex slug.
+    if include_keywords == frozenset({"revenue", "opex"}):
+        return True
+    # Revenue-only denominator is выручка, not EBITDA (e.g. P4 margin).
+    if leg == "denominator" and include_keywords <= frozenset({"revenue"}):
         return False
-    return not include_keywords or include_keywords <= EBITDA_COMPONENT_SLUGS
+    # EBITDA margin numerators can be mis-tagged with revenue slugs only.
+    if leg == "numerator" and include_keywords <= frozenset({"revenue"}):
+        return True
+    return False
 
 
 def _special_metric(
@@ -675,21 +754,11 @@ def _ebitda_breakdown(
     *,
     period: tuple[date, date],
     apply_reclass: bool,
-    addback_items: list[tuple[str, Decimal, list[dict[str, Any]]]],
+    addback_items: list[tuple[str, Decimal, list[dict[str, Any]], bool]],
     label: str,
 ) -> LegBreakdown:
-    revenue_spec = {
-        "include_keywords": ["revenue"],
-        "exclude_keywords": [],
-        "apply_reclass": apply_reclass,
-    }
-    opex_spec = {
-        "include_keywords": ["opex"],
-        "exclude_keywords": [],
-        "apply_reclass": apply_reclass,
-    }
-    revenue_rows = _filter_rows(ledger, revenue_spec, period=period, parties=None)
-    opex_rows = _filter_rows(ledger, opex_spec, period=period, parties=None)
+    revenue_rows = _ebitda_revenue_rows(ledger, period=period, apply_reclass=apply_reclass)
+    opex_rows = _ebitda_opex_rows(ledger, period=period, apply_reclass=apply_reclass)
     revenue = _sum_rows(revenue_rows)
     opex = _sum_rows(opex_rows)
     value = revenue + opex
@@ -697,10 +766,16 @@ def _ebitda_breakdown(
         ("revenue", revenue),
         ("opex", opex),
     ]
+    flags: list[str] = []
     opex_txn_ids = {str(row.get("txn_id")) for row in opex_rows if row.get("txn_id")}
-    for adj_id, above_floor, addback_rows in addback_items:
+    for adj_id, above_floor, addback_rows, floor_missing in addback_items:
         # One-off rows are expenses: subtract every row that the opex leg has
-        # not already captured, then add back only the above-floor ones.
+        # not already captured, then add back only the above-floor ones. When
+        # the floor sentence was not extracted, every listed row is treated as
+        # above-floor and the cell is flagged for review instead of dropping
+        # the adjustment.
+        if floor_missing and FLOOR_MISSING_REVIEW not in flags:
+            flags.append(FLOOR_MISSING_REVIEW)
         unsubtracted = sum(
             (
                 _d(row.get("amount"))
@@ -724,6 +799,7 @@ def _ebitda_breakdown(
         value=value,
         expression=expression,
         terms=terms,
+        flags=flags,
         categories=sorted({row.get("category", "other") for row in revenue_rows + opex_rows}),
     )
 
@@ -752,10 +828,16 @@ def _leg_breakdown(
     notes = _metric_notes(metric.get("notes", ""))
 
     if _is_ebitda_leg(spec, notes, leg=leg):
-        addback_items: list[tuple[str, Decimal, list[dict[str, Any]]]] = []
-        if "скорректированная" in notes:
+        addback_items: list[tuple[str, Decimal, list[dict[str, Any]], bool]] = []
+        if _is_adjusted_ebitda_notes(notes):
             addback_items = _ebitda_addback_adjustments(adjustments, scenario_id)
-            for adj_id, _, _rows in addback_items:
+            if not addback_items:
+                flags.append(EBITDA_CONSTRUCTION_FAILED)
+                breakdown = LegBreakdown(kind="empty", value=ZERO, flags=flags)
+                _record_leg_metadata(metadata, leg=leg, breakdown=breakdown)
+                _assert_leg_subtotal(breakdown, scenario_id=scenario_id, slot=slot, leg=leg)
+                return breakdown
+            for adj_id, _, _rows, _floor_missing in addback_items:
                 _record_adjustment_application(
                     metadata,
                     adjustment_id=adj_id,
@@ -1044,7 +1126,20 @@ def compute_covenant_metric(
                 flags.append(IDENTICAL_LEGS)
             metadata["identical_leg_rows"] = sorted(identical_rows)
         return ZERO
+
+    leg_flags = list(numerator_breakdown.flags) + list(denominator_breakdown.flags)
+    if EMPTY_LEG in leg_flags or EBITDA_CONSTRUCTION_FAILED in leg_flags:
+        if metadata is not None:
+            flags = metadata.setdefault("flags", [])
+            for flag in (EMPTY_LEG, EBITDA_CONSTRUCTION_FAILED):
+                if flag in leg_flags and flag not in flags:
+                    flags.append(flag)
+        return ZERO
     if denominator_breakdown.value == ZERO:
+        if metadata is not None:
+            flags = metadata.setdefault("flags", [])
+            if ZERO_DENOMINATOR not in flags:
+                flags.append(ZERO_DENOMINATOR)
         return ZERO
     return abs(numerator_breakdown.value / denominator_breakdown.value)
 
