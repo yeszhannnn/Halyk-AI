@@ -5,8 +5,6 @@
 **Reads an archive of corporate loan documents and a transaction ledger, then decides for every covenant of every borrower whether it is met.**
 
 ![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)
-![Score](https://img.shields.io/badge/public_score-34.94_/_36-2EA043?style=for-the-badge)
-![Providers](https://img.shields.io/badge/OpenAI_·_Anthropic-000000?style=for-the-badge)
 ![Halyk AI Challenge](https://img.shields.io/badge/Halyk_AI_Challenge-2026-6E7681?style=for-the-badge)
 
 </div>
