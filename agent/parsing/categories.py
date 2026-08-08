@@ -17,6 +17,29 @@ OPEX_SLUGS = frozenset(
     }
 )
 
+INFLOW_CATEGORIES = frozenset(
+    {
+        "revenue",
+        "financing",
+        "interest_income",
+    }
+)
+
+
+def category_sign(category: str) -> str:
+    """Derive cash-flow sign from a ledger category slug."""
+    return "INFLOW" if category in INFLOW_CATEGORIES else "OUTFLOW"
+
+
+def derive_leg_sign(categories: list[str]) -> str:
+    """Aggregate sign for a leg that may include multiple ledger categories."""
+    if not categories:
+        return "OUTFLOW"
+    signs = {category_sign(category) for category in categories}
+    if len(signs) == 1:
+        return signs.pop()
+    return "BOTH"
+
 INTEREST_INCOME_MARKERS = (
     "interest income",
     "interest credited",

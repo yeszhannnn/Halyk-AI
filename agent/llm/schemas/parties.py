@@ -5,7 +5,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
-from agent.parsing.numbers import normalize_decimal
+from agent.parsing.numbers import normalize_decimal, normalize_optional_decimal
 
 
 class OwnershipRowExtract(BaseModel):
@@ -50,10 +50,12 @@ class KycPartiesExtract(BaseModel):
     table_semantics_quote: str = Field(
         description="Verbatim quote of the rule sentence beneath the table.",
     )
-    threshold_pct: Decimal = Field(
+    threshold_pct: Decimal | None = Field(
+        default=None,
         description=(
             "Numeric percentage from the rule sentence beneath the table "
-            "(e.g. 35.0 for related-party threshold or 50.0 for security perimeter)."
+            "(e.g. 35.0 for related-party threshold or 50.0 for security perimeter). "
+            "Null when the dossier states no threshold; never invent one."
         ),
     )
     threshold_quote: str = Field(
@@ -63,4 +65,4 @@ class KycPartiesExtract(BaseModel):
     @field_validator("threshold_pct", mode="before")
     @classmethod
     def _parse_threshold_pct(cls, value: Any) -> Any:
-        return normalize_decimal(value, field_name="threshold_pct")
+        return normalize_optional_decimal(value, field_name="threshold_pct")

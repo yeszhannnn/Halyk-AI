@@ -15,6 +15,7 @@ from agent.llm.client import LLMClient
 from agent.llm.schemas.parties import KycPartiesExtract
 from agent.llm.vision_guard import complete_vision_dual
 from agent.models import Provenance, RelatedParty
+from agent.parsing.numbers import capture_absent_values
 from agent.shape import is_canonical_open_dataset
 from agent.stages import StageResult
 
@@ -662,15 +663,25 @@ async def _run_async(work_dir: Path) -> StageResult:
                 perimeter = None
                 digit_mismatches: list[dict[str, Any]] = []
             else:
-                extracted, verification, source_kind, review_fields, perimeter, digit_mismatches = (
-                    await _extract_dossier(
-                        client,
-                        work_dir=work_dir,
-                        scenario_id=scenario_id,
-                        doc_id=doc_id,
-                        doc=doc,
+                with capture_absent_values() as absent_fields:
+                    extracted, verification, source_kind, review_fields, perimeter, digit_mismatches = (
+                        await _extract_dossier(
+                            client,
+                            work_dir=work_dir,
+                            scenario_id=scenario_id,
+                            doc_id=doc_id,
+                            doc=doc,
+                        )
                     )
-                )
+                for field_name in absent_fields:
+                    conflicts.append(
+                        {
+                            "kind": "ABSENT_VALUE",
+                            "field": field_name,
+                            "scenario_id": scenario_id,
+                            "doc_id": doc_id,
+                        },
+                    )
 
             conflicts.extend(digit_mismatches)
             review.extend(digit_mismatches)
@@ -686,6 +697,15 @@ async def _run_async(work_dir: Path) -> StageResult:
                 continue
 
             threshold = extracted.threshold_pct
+            if threshold is None:
+                conflicts.append(
+                    {
+                        "kind": "KYC_THRESHOLD_ABSENT",
+                        "scenario_id": scenario_id,
+                        "doc_id": doc_id,
+                    },
+                )
+                continue
             table_semantics = extracted.table_semantics
             pages = doc["pages"]
             parties, ownership_rows = _related_parties_from_extract(
@@ -744,7 +764,7 @@ async def _run_async(work_dir: Path) -> StageResult:
                 "verification": verification,
             }
 
-            if perimeter is not None:
+            if perimeter is not None and perimeter.threshold_pct is not None:
                 peri_threshold = perimeter.threshold_pct
                 _, peri_rows = _related_parties_from_extract(
                     perimeter,

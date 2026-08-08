@@ -10,11 +10,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from agent.config import DEADLINE, MODEL_ID, TEMPERATURE
+from agent.config import DEADLINE, LLM_PROVIDER, MODEL_ID, TEMPERATURE
 from agent.degrade import apply_degradation_ladder
 from agent.preflight import print_preflight_report, run_preflight
 from agent.stages import StageResult
-from agent.stages import s1_ingest, s2_classify, s3_bind, s4_extract, s5_ledger, s6_evaluate, s7_emit
+from agent.stages import s1_ingest, s2_classify, s3_bind, s4_extract, s4a_covenants, s5_ledger, s6_evaluate, s7_emit
 
 
 @dataclass(frozen=True)
@@ -33,7 +33,8 @@ STAGES: tuple[StageSpec, ...] = (
         ("04a_covenants.json", "04b_parties.json", "04c_adjustments.json"),
         s4_extract.run,
     ),
-    StageSpec("s5_ledger", ("05_ledger.parquet",), s5_ledger.run),
+    StageSpec("s5_ledger", ("05_ledger.parquet", "05_ledger.json"), s5_ledger.run),
+    StageSpec("s4a_covenants", ("04a_covenants.json",), s4a_covenants.run),
     StageSpec("s6_evaluate", ("06_evaluated.json",), s6_evaluate.run),
     StageSpec("s7_emit", ("trace.json",), s7_emit.run),
 )
@@ -63,6 +64,7 @@ def _write_manifest(
 ) -> None:
     manifest = {
         "git_sha": _git_sha(),
+        "llm_provider": LLM_PROVIDER,
         "model_id": MODEL_ID,
         "temperature": TEMPERATURE,
         "input_dir": str(input_dir),
@@ -79,7 +81,12 @@ def _write_manifest(
 
 
 def _outputs_exist(work_dir: Path, outputs: Sequence[str]) -> bool:
-    return all((work_dir / name).exists() for name in outputs)
+    missing = [name for name in outputs if not (work_dir / name).exists()]
+    return not missing
+
+
+def _missing_outputs(work_dir: Path, outputs: Sequence[str]) -> list[str]:
+    return [name for name in outputs if not (work_dir / name).exists()]
 
 
 def _log_stage(stage_name: str, elapsed_ms: int, result: StageResult) -> None:
@@ -154,6 +161,10 @@ def _run_pipeline(argv: Sequence[str]) -> int:
         if not args.force and _outputs_exist(work_dir, spec.outputs):
             print(f"{spec.name}: skipped (outputs exist)")
             continue
+
+        missing = _missing_outputs(work_dir, spec.outputs)
+        if missing and not args.force:
+            print(f"{spec.name}: running (missing {', '.join(missing)})")
 
         started = time.perf_counter()
         try:

@@ -351,9 +351,27 @@ def run(*, work_dir: Path) -> StageResult:
     finally:
         con.close()
 
+    categories = sorted({str(row["category"]) for row in rows})
+    scenario_ids = sorted({str(row["scenario_id"]) for row in rows})
+    categories_by_scenario = {
+        scenario_id: sorted(
+            {str(row["category"]) for row in rows if str(row["scenario_id"]) == scenario_id}
+        )
+        for scenario_id in scenario_ids
+    }
+
     meta_path = work_dir / "05_ledger.json"
     meta_path.write_text(
-        json.dumps({"conflicts": conflicts}, indent=2, ensure_ascii=False) + "\n",
+        json.dumps(
+            {
+                "conflicts": conflicts,
+                "categories": categories,
+                "categories_by_scenario": categories_by_scenario,
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n",
         encoding="utf-8",
     )
 

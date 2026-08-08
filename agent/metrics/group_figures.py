@@ -59,9 +59,8 @@ def _borrower_name_from_audit_notes(text: str) -> str | None:
     return None
 
 
-def _capex_keywords_match(include_keywords: list[str]) -> bool:
-    keys = [keyword.casefold() for keyword in include_keywords]
-    return any("капитал" in key for key in keys)
+def _capex_categories_match(include_keywords: list[str]) -> bool:
+    return "capex" in {str(keyword) for keyword in include_keywords}
 
 
 def _ppe_additions_from_text(text: str) -> Decimal | None:
@@ -100,7 +99,7 @@ def resolve_group_figure(
     inventory_documents: dict[str, Any] | None = None,
 ) -> tuple[Decimal | None, str | None]:
     """Return a consolidated group figure and a short source label."""
-    if not _capex_keywords_match(include_keywords):
+    if not _capex_categories_match(include_keywords):
         return None, None
 
     texts: list[tuple[str, str]] = []

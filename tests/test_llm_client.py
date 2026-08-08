@@ -2,18 +2,24 @@ from __future__ import annotations
 
 import asyncio
 from decimal import Decimal
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from anthropic import RateLimitError as AnthropicRateLimitError
 from openai import RateLimitError
 
 from agent.llm.client import (
     LLMTransportExhaustedError,
+    _cache_key,
     _estimate_request_tokens,
     _is_rate_limited,
     _is_transport_error,
     _is_validation_error,
     _retry_after_seconds,
+    _usage_fields,
+    vision_image_block,
 )
 from agent.llm.token_bucket import TokenBucket
 from agent.stages.s4a_covenants import (
@@ -28,6 +34,67 @@ def _rate_limit_error(message: str) -> RateLimitError:
     response.headers = {}
     response.status_code = 429
     return RateLimitError(message, response=response, body=message)
+
+
+def _anthropic_rate_limit_error(message: str) -> AnthropicRateLimitError:
+    response = MagicMock()
+    response.headers = {}
+    response.status_code = 429
+    return AnthropicRateLimitError(message, response=response, body=message)
+
+
+def test_is_rate_limited_classifies_anthropic_429_as_transport() -> None:
+    exc = _anthropic_rate_limit_error("Rate limit reached. Please try again in 618ms.")
+    assert _is_rate_limited(exc)
+    assert _is_transport_error(exc)
+    assert not _is_validation_error(exc)
+    assert _retry_after_seconds(exc) == pytest.approx(0.618)
+
+
+def test_usage_fields_reads_anthropic_token_names() -> None:
+    usage = SimpleNamespace(input_tokens=120, output_tokens=45)
+    assert _usage_fields(usage) == {
+        "prompt_tokens": 120,
+        "completion_tokens": 45,
+        "total_tokens": 165,
+    }
+
+
+def test_cache_key_includes_provider() -> None:
+    openai_key = _cache_key(
+        provider="openai",
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": "hello"}],
+        params={"temperature": 0},
+    )
+    anthropic_key = _cache_key(
+        provider="anthropic",
+        model="claude-haiku-4-5-20251001",
+        messages=[{"role": "user", "content": "hello"}],
+        params={"temperature": 0},
+    )
+    assert openai_key != anthropic_key
+
+
+def test_vision_image_block_formats_by_provider(tmp_path: Path) -> None:
+    image_path = tmp_path / "page.png"
+    image_path.write_bytes(b"fake-png")
+
+    with patch("agent.llm.client.LLM_PROVIDER", "openai"):
+        openai_block = vision_image_block(image_path)
+    assert openai_block["type"] == "image_url"
+    assert openai_block["image_url"]["url"].startswith("data:image/png;base64,")
+
+    with patch("agent.llm.client.LLM_PROVIDER", "anthropic"):
+        anthropic_block = vision_image_block(image_path)
+    assert anthropic_block == {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": "image/png",
+            "data": openai_block["image_url"]["url"].split(",", 1)[1],
+        },
+    }
 
 
 def test_retry_after_seconds_parses_milliseconds() -> None:
@@ -109,7 +176,7 @@ async def test_transport_retries_at_least_five_times_on_429() -> None:
         raise _rate_limit_error("Please try again in 1ms")
 
     client = LLMClient(semaphore=asyncio.Semaphore(1))
-    client._client.chat.completions.create_with_completion = AsyncMock(side_effect=flaky_create)  # type: ignore[method-assign]
+    client._client.create_with_completion = AsyncMock(side_effect=flaky_create)  # type: ignore[method-assign]
 
     with patch("agent.llm.client.get_token_bucket") as bucket_mock:
         bucket_mock.return_value.acquire = AsyncMock()

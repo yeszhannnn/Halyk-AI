@@ -3,9 +3,9 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
-from agent.parsing.numbers import normalize_decimal
+from agent.parsing.numbers import normalize_decimal, normalize_optional_decimal
 
 
 class EbitdaAddbackRowExtract(BaseModel):
@@ -91,10 +91,8 @@ class AdjustmentExtract(BaseModel):
 
     @field_validator("amount", "fx_source_amount", "fx_settlement_usd", "materiality_floor", mode="before")
     @classmethod
-    def _parse_optional_decimal(cls, value: Any) -> Any:
-        if value is None or value == "":
-            return None
-        return normalize_decimal(value, field_name="amount")
+    def _parse_optional_decimal(cls, value: Any, info: ValidationInfo) -> Any:
+        return normalize_optional_decimal(value, field_name=info.field_name)
 
 
 class VisionAdjustmentsExtract(BaseModel):

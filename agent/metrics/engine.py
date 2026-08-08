@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from agent.metrics.group_figures import resolve_group_figure
-from agent.parsing.categories import OPEX_SLUGS
+from agent.parsing.categories import INFLOW_CATEGORIES, OPEX_SLUGS, category_sign, derive_leg_sign
 from agent.stages.s4b_parties import normalize_counterparty
 
 ZERO = Decimal("0")
@@ -219,93 +219,60 @@ def _amount_for_aggregation(amount: Decimal) -> Decimal:
     return abs(amount)
 
 
-def _keyword_matches(
-    keyword: str,
+RELATED_PARTY_MARKERS = (
+    "связан",
+    "аффилир",
+    "related party",
+    "related-party",
+    "affiliate",
+    "ограниченные платежи",
+)
+
+
+def _text_refers_to_related_parties(text: str) -> bool:
+    normalized = str(text or "").casefold()
+    return any(marker in normalized for marker in RELATED_PARTY_MARKERS)
+
+
+def _requires_related_party_filter(covenant_context: dict[str, Any] | None) -> bool:
+    if not covenant_context:
+        return False
+    text = " ".join(
+        [
+            str(covenant_context.get("title") or ""),
+            str(covenant_context.get("notes") or ""),
+            str((covenant_context.get("metric") or {}).get("notes") or ""),
+        ],
+    )
+    return _text_refers_to_related_parties(text)
+
+
+def _is_related_party_leg(
+    covenant_context: dict[str, Any] | None,
     *,
-    row: dict[str, Any],
-    category: str,
-    parties: dict[str, Any] | None,
-    group_scope: bool = False,
+    leg: str | None,
 ) -> bool:
-    key = keyword.casefold()
-    desc = str(row.get("description") or "").casefold()
-
-    if key in {"ebitda", "выручка за вычетом операционных расходов"}:
+    """Payment legs for related-party covenants filter by counterparty, not category."""
+    if leg != "numerator" or not _requires_related_party_filter(covenant_context):
         return False
-    if key in {"скорректированная ebitda"}:
+    return True
+
+
+def _requires_unrestricted_subsidiary_capex(covenant_context: dict[str, Any] | None) -> bool:
+    if not covenant_context:
         return False
+    text = " ".join(
+        [
+            str(covenant_context.get("title") or ""),
+            str(covenant_context.get("notes") or ""),
+            str((covenant_context.get("metric") or {}).get("notes") or ""),
+        ],
+    ).casefold()
+    return "неограниченн" in text and "дочерн" in text and "капитал" in text
 
-    if key in {"выручка", "выручки"}:
-        return category == "revenue" and not _is_excluded_inflow(str(row.get("description") or ""))
 
-    if key in {"процентные расходы"}:
-        return category == "interest"
-
-    if key in {
-        "капитальные затраты",
-        "совокупных капитальных затрат",
-        "совокупные капитальные затраты заёмщика",
-    } or ("капитальных затрат" in key and "заёмщика" in key):
-        return _is_capex_row(row, group_scope=group_scope)
-
-    if key in {
-        "расходы на оплату труда",
-        "расходов на оплату труда",
-        "всех расходов на оплату труда",
-    }:
-        return category == "personnel" or str(row.get("category") or "") == "severance"
-
-    if key in {
-        "расходы на коммунальные услуги",
-        "коммунальные расходы",
-        "коммунальных расходов",
-    }:
-        return category == "utilities"
-
-    if key in {"налоги"}:
-        return category == "tax"
-
-    if key in {"страховые премии"}:
-        return category == "insurance"
-
-    if key in {"арендные и коммунальные расходы"}:
-        return category in {"rent", "utilities"}
-
-    if key in {"арендных платежей"}:
-        return category == "rent"
-
-    if key in {"операционных и капитальных затрат"}:
-        return category in {"opex", "capex"}
-
-    if key in {"операционных расходов"}:
-        return category == "opex"
-
-    if key in {"поступления по финансированию", "поступлений по финансированию"}:
-        return category == "financing" and not _is_excluded_inflow(str(row.get("description") or ""))
-
-    if key in {
-        "платежи",
-        "платежей в пользу связанных сторон",
-        "связанные стороны",
-        "ограниченные платежи",
-        "ограниченные платежи в пользу аффилированных лиц",
-        "аффилированные лица",
-    }:
-        if parties is None:
-            return False
-        return _counterparty_matches(row, _related_counterparties(parties))
-
-    if "неограниченным дочерним организациям" in key and "капитал" in key:
-        if category != "capex" or parties is None:
-            return False
-        return _counterparty_matches(row, _unrestricted_counterparties(parties))
-
-    if "совокупного обязательства" in key and "выходных пособий" in key:
-        return str(row.get("category") or "") == "severance"
-
-    if key in desc or key in category:
-        return True
-    return False
+def _category_matches(category: str, include_keywords: list[str]) -> bool:
+    return category in {str(keyword) for keyword in include_keywords}
 
 
 def _exclude_matches(
@@ -329,12 +296,7 @@ def _exclude_matches(
         if original == current:
             return False
         for include_keyword in spec.get("include_keywords") or []:
-            if _keyword_matches(
-                include_keyword,
-                row={**row, "category": original, "original_category": original},
-                category=original,
-                parties=None,
-            ):
+            if _category_matches(original, [str(include_keyword)]):
                 return True
         return False
     if "аффилированных и связанных сторон" in key:
@@ -355,6 +317,8 @@ def _row_matches_spec(
     period: tuple[date, date],
     parties: dict[str, Any] | None,
     group_scope: bool = False,
+    covenant_context: dict[str, Any] | None = None,
+    leg: str | None = None,
 ) -> bool:
     if row.get("excluded"):
         return False
@@ -362,8 +326,6 @@ def _row_matches_spec(
         return False
     amount = _d(row.get("amount_usd"))
     if amount == ZERO:
-        return False
-    if not _sign_ok(amount, spec["sign"]):
         return False
 
     apply_reclass = bool(spec.get("apply_reclass", True))
@@ -378,19 +340,45 @@ def _row_matches_spec(
         ):
             return False
 
-    include_keywords = spec.get("include_keywords") or []
+    related_party_leg = _is_related_party_leg(covenant_context, leg=leg)
+    if related_party_leg:
+        if amount >= ZERO:
+            return False
+        if parties is None or not _counterparty_matches(row, _related_counterparties(parties)):
+            return False
+        return True
+
+    include_keywords = [str(keyword) for keyword in spec.get("include_keywords") or []]
     if not include_keywords:
         return False
-    return any(
-        _keyword_matches(
-            keyword,
-            row=row,
-            category=category,
-            parties=parties,
-            group_scope=group_scope,
-        )
-        for keyword in include_keywords
-    )
+
+    if group_scope and "capex" in include_keywords and _is_capex_row(row, group_scope=True):
+        matched = True
+    elif _category_matches(category, include_keywords):
+        matched = True
+    else:
+        matched = False
+
+    if not matched:
+        return False
+
+    if category in INFLOW_CATEGORIES and _is_excluded_inflow(str(row.get("description") or "")):
+        return False
+
+    if not _sign_ok(amount, category_sign(category)):
+        return False
+
+    if (
+        _requires_unrestricted_subsidiary_capex(covenant_context)
+        and category == "capex"
+    ):
+        if parties is None or not _counterparty_matches(
+            row,
+            _unrestricted_counterparties(parties),
+        ):
+            return False
+
+    return True
 
 
 def _filter_rows(
@@ -400,6 +388,8 @@ def _filter_rows(
     period: tuple[date, date],
     parties: dict[str, Any] | None,
     group_scope: bool = False,
+    covenant_context: dict[str, Any] | None = None,
+    leg: str | None = None,
 ) -> list[dict[str, Any]]:
     return [
         row
@@ -410,6 +400,8 @@ def _filter_rows(
             period=period,
             parties=parties,
             group_scope=group_scope,
+            covenant_context=covenant_context,
+            leg=leg,
         )
     ]
 
@@ -502,15 +494,13 @@ def _compute_ebitda(
     addbacks: Decimal = ZERO,
 ) -> Decimal:
     revenue_spec = {
-        "include_keywords": ["Выручка"],
+        "include_keywords": ["revenue"],
         "exclude_keywords": [],
-        "sign": "INFLOW",
         "apply_reclass": apply_reclass,
     }
     opex_spec = {
-        "include_keywords": ["Операционных расходов"],
+        "include_keywords": ["opex"],
         "exclude_keywords": [],
-        "sign": "OUTFLOW",
         "apply_reclass": apply_reclass,
     }
     revenue = _sum_rows(_filter_rows(ledger, revenue_spec, period=period, parties=None))
@@ -520,6 +510,16 @@ def _compute_ebitda(
 
 def _metric_notes(notes: str) -> str:
     return " ".join(str(notes).split()).casefold()
+
+
+def _notes_define_ebitda_leg(notes: str, spec: dict[str, Any]) -> bool:
+    text = notes.casefold()
+    if "ebitda" not in text:
+        return False
+    include_keywords = {str(keyword).casefold() for keyword in spec.get("include_keywords") or []}
+    if "capex" in include_keywords:
+        return False
+    return True
 
 
 def _special_metric(
@@ -538,15 +538,13 @@ def _special_metric(
 
     if slot == "6.2" and "individual overhead line ceiling" in title.casefold():
         payroll_spec = {
-            "include_keywords": ["расходы на оплату труда"],
+            "include_keywords": ["personnel"],
             "exclude_keywords": [],
-            "sign": "OUTFLOW",
             "apply_reclass": True,
         }
         util_spec = {
-            "include_keywords": ["расходы на коммунальные услуги"],
+            "include_keywords": ["utilities"],
             "exclude_keywords": [],
-            "sign": "OUTFLOW",
             "apply_reclass": True,
         }
         return max(
@@ -559,9 +557,8 @@ def _special_metric(
             _filter_rows(
                 ledger,
                 {
-                    "include_keywords": ["Выручка"],
+                    "include_keywords": ["revenue"],
                     "exclude_keywords": [],
-                    "sign": "INFLOW",
                     "apply_reclass": False,
                 },
                 period=period,
@@ -572,9 +569,8 @@ def _special_metric(
             _filter_rows(
                 ledger,
                 {
-                    "include_keywords": ["Расходов на оплату труда"],
+                    "include_keywords": ["personnel"],
                     "exclude_keywords": [],
-                    "sign": "OUTFLOW",
                     "apply_reclass": False,
                 },
                 period=period,
@@ -585,9 +581,8 @@ def _special_metric(
             _filter_rows(
                 ledger,
                 {
-                    "include_keywords": ["Налоги"],
+                    "include_keywords": ["tax"],
                     "exclude_keywords": [],
-                    "sign": "OUTFLOW",
                     "apply_reclass": False,
                 },
                 period=period,
@@ -648,15 +643,13 @@ def _ebitda_breakdown(
     label: str,
 ) -> LegBreakdown:
     revenue_spec = {
-        "include_keywords": ["Выручка"],
+        "include_keywords": ["revenue"],
         "exclude_keywords": [],
-        "sign": "INFLOW",
         "apply_reclass": apply_reclass,
     }
     opex_spec = {
-        "include_keywords": ["Операционных расходов"],
+        "include_keywords": ["opex"],
         "exclude_keywords": [],
-        "sign": "OUTFLOW",
         "apply_reclass": apply_reclass,
     }
     revenue_rows = _filter_rows(ledger, revenue_spec, period=period, parties=None)
@@ -698,49 +691,18 @@ def _leg_breakdown(
     full_ledger: list[dict[str, Any]],
     work_dir: Path | None = None,
     metadata: dict[str, Any] | None = None,
+    covenant_context: dict[str, Any] | None = None,
 ) -> LegBreakdown:
     if spec is None:
         return LegBreakdown(kind="empty", value=ZERO)
 
     include_keywords = spec.get("include_keywords") or []
     flags: list[str] = []
-    if not include_keywords:
-        flags.append(EMPTY_CATEGORY_SPEC)
-        breakdown = LegBreakdown(kind="empty", value=ZERO, flags=flags)
-        _record_leg_metadata(metadata, leg=leg, breakdown=breakdown)
-        _assert_leg_subtotal(breakdown, scenario_id=scenario_id, slot=slot, leg=leg)
-        return breakdown
+    notes = _metric_notes(metric.get("notes", ""))
 
-    scope = metric.get("scope", "BORROWER")
-    effective_scope = scope if leg == "numerator" else "BORROWER"
-    leg_ledger = _rows_for_scope(full_ledger, scenario_id=scenario_id, scope=effective_scope)
-    group_scope = scope == "GROUP" and leg == "numerator"
-    keywords = [k.casefold() for k in include_keywords]
-
-    if leg == "numerator" and scope == "GROUP" and group_scope:
-        group_value, source = resolve_group_figure(
-            scenario_id=scenario_id,
-            include_keywords=include_keywords,
-            work_dir=work_dir,
-        )
-        if group_value is not None:
-            breakdown = LegBreakdown(
-                kind="document",
-                value=group_value,
-                expression=f"group figure from {source}",
-                terms=[(f"group:{source}", group_value)],
-                flags=flags,
-            )
-            _record_leg_metadata(metadata, leg=leg, breakdown=breakdown)
-            _assert_leg_subtotal(breakdown, scenario_id=scenario_id, slot=slot, leg=leg)
-            return breakdown
-        flags.append(GROUP_FIGURE_NOT_FOUND)
-        if metadata is not None:
-            metadata["strategy"] = "group_scope_borrower_fallback"
-
-    if any("ebitda" in k for k in keywords):
+    if leg == "numerator" and _notes_define_ebitda_leg(notes, spec):
         addback_items: list[tuple[str, Decimal]] = []
-        if leg == "numerator" and "скорректированная" in _metric_notes(metric.get("notes", "")):
+        if leg == "numerator" and "скорректированная" in notes:
             addback_items = _ebitda_addback_adjustments(adjustments, scenario_id)
             for adj_id, _ in addback_items:
                 _record_adjustment_application(
@@ -774,19 +736,55 @@ def _leg_breakdown(
         _assert_leg_subtotal(breakdown, scenario_id=scenario_id, slot=slot, leg=leg)
         return breakdown
 
+    related_party_leg = _is_related_party_leg(covenant_context, leg=leg)
+    if not include_keywords and not related_party_leg:
+        flags.append(EMPTY_CATEGORY_SPEC)
+        breakdown = LegBreakdown(kind="empty", value=ZERO, flags=flags)
+        _record_leg_metadata(metadata, leg=leg, breakdown=breakdown)
+        _assert_leg_subtotal(breakdown, scenario_id=scenario_id, slot=slot, leg=leg)
+        return breakdown
+
+    scope = metric.get("scope", "BORROWER")
+    effective_scope = scope if leg == "numerator" else "BORROWER"
+    leg_ledger = _rows_for_scope(full_ledger, scenario_id=scenario_id, scope=effective_scope)
+    group_scope = scope == "GROUP" and leg == "numerator"
+
+    if leg == "numerator" and scope == "GROUP" and group_scope:
+        group_value, source = resolve_group_figure(
+            scenario_id=scenario_id,
+            include_keywords=include_keywords,
+            work_dir=work_dir,
+        )
+        if group_value is not None:
+            breakdown = LegBreakdown(
+                kind="document",
+                value=group_value,
+                expression=f"group figure from {source}",
+                terms=[(f"group:{source}", group_value)],
+                flags=flags,
+            )
+            _record_leg_metadata(metadata, leg=leg, breakdown=breakdown)
+            _assert_leg_subtotal(breakdown, scenario_id=scenario_id, slot=slot, leg=leg)
+            return breakdown
+        flags.append(GROUP_FIGURE_NOT_FOUND)
+        if metadata is not None:
+            metadata["strategy"] = "group_scope_borrower_fallback"
+
     rows = _filter_rows(
         leg_ledger,
         spec,
         period=period,
         parties=parties,
         group_scope=group_scope,
+        covenant_context=covenant_context,
+        leg=leg,
     )
     _assert_leg_scenario(rows, scenario_id=scenario_id, leg=leg)
     categories = _leg_categories(rows, spec)
     value = _sum_rows(rows)
 
     kind = "rows" if rows else "empty"
-    if kind == "empty" and include_keywords and EMPTY_LEG not in flags:
+    if kind == "empty" and (include_keywords or related_party_leg) and EMPTY_LEG not in flags:
         flags.append(EMPTY_LEG)
         if metadata is not None:
             metadata.setdefault("empty_legs", []).append(
@@ -795,6 +793,8 @@ def _leg_breakdown(
                     "slot": slot,
                     "leg": leg,
                     "keywords": list(include_keywords),
+                    "row_count": 0,
+                    "category_count": 0,
                 },
             )
     breakdown = LegBreakdown(
@@ -823,6 +823,7 @@ def _leg_value(
     full_ledger: list[dict[str, Any]],
     work_dir: Path | None = None,
     metadata: dict[str, Any] | None = None,
+    covenant_context: dict[str, Any] | None = None,
 ) -> Decimal:
     return _leg_breakdown(
         ledger,
@@ -837,6 +838,7 @@ def _leg_value(
         full_ledger=full_ledger,
         work_dir=work_dir,
         metadata=metadata,
+        covenant_context=covenant_context,
     ).value
 
 
@@ -858,6 +860,11 @@ def describe_leg_breakdown(
     if leg == "denominator" and metric.get("kind") == "RATIO":
         metric = {**metric, "scope": "BORROWER"}
     scenario_ledger = [row for row in ledger if row.get("scenario_id") == scenario_id]
+    covenant_context = {
+        "title": covenant.get("title"),
+        "notes": covenant.get("metric", {}).get("notes"),
+        "metric": covenant.get("metric"),
+    }
     return _leg_breakdown(
         scenario_ledger,
         spec,
@@ -870,6 +877,7 @@ def describe_leg_breakdown(
         metric=metric,
         full_ledger=ledger,
         work_dir=work_dir,
+        covenant_context=covenant_context,
     )
 
 
@@ -888,6 +896,11 @@ def compute_covenant_metric(
     slot = covenant["slot"]
     period = (_parse_date(covenant["period"][0]), _parse_date(covenant["period"][1]))
     scenario_ledger = [row for row in ledger if row.get("scenario_id") == scenario_id]
+    covenant_context = {
+        "title": covenant.get("title"),
+        "notes": covenant.get("metric", {}).get("notes"),
+        "metric": covenant.get("metric"),
+    }
 
     special = _special_metric(
         covenant,
@@ -914,6 +927,7 @@ def compute_covenant_metric(
             full_ledger=ledger,
             work_dir=work_dir,
             metadata=metadata,
+            covenant_context=covenant_context,
         )
 
     numerator = _leg_value(
@@ -929,6 +943,7 @@ def compute_covenant_metric(
         full_ledger=ledger,
         work_dir=work_dir,
         metadata=metadata,
+        covenant_context=covenant_context,
     )
     denominator = _leg_value(
         scenario_ledger,
@@ -943,6 +958,7 @@ def compute_covenant_metric(
         full_ledger=ledger,
         work_dir=work_dir,
         metadata=metadata,
+        covenant_context=covenant_context,
     )
     if denominator == ZERO:
         return ZERO
@@ -955,24 +971,17 @@ def _explain_row_match(
     *,
     parties: dict[str, Any] | None,
     group_scope: bool = False,
+    covenant_context: dict[str, Any] | None = None,
+    leg: str | None = None,
 ) -> str:
     category = _effective_category(row, bool(spec.get("apply_reclass", True)))
-    desc = str(row.get("description") or "")
     if row.get("synthetic"):
         ref = row.get("adjustment_ref") or "off_ledger"
         return f"off_ledger~{ref}"
+    if _is_related_party_leg(covenant_context, leg=leg):
+        return f"related_party_outflow counterparty={row.get('counterparty')}"
     for keyword in spec.get("include_keywords") or []:
-        if _keyword_matches(
-            keyword,
-            row=row,
-            category=category,
-            parties=parties,
-            group_scope=group_scope,
-        ):
-            key = keyword.casefold()
-            if key in desc.casefold():
-                token = desc.strip().split()[0][:24] if desc.strip() else keyword[:24]
-                return f"description~{token.casefold()}"
+        if _category_matches(category, [str(keyword)]):
             return f"category={category}"
     return f"category={category}"
 
@@ -988,6 +997,11 @@ def collect_covenant_inputs(
     scenario_id = covenant["scenario_id"]
     metric = covenant["metric"]
     scope = metric.get("scope", "BORROWER")
+    covenant_context = {
+        "title": covenant.get("title"),
+        "notes": metric.get("notes"),
+        "metric": metric,
+    }
     inputs: list[dict[str, str]] = []
     seen: set[str | None] = set()
 
@@ -1003,8 +1017,12 @@ def collect_covenant_inputs(
             continue
 
         matched_spec: dict[str, Any] | None = None
+        matched_leg: str | None = None
         group_scope = scope == "GROUP"
-        for spec in (metric["numerator"], metric.get("denominator")):
+        for leg_name, spec in (
+            ("numerator", metric["numerator"]),
+            ("denominator", metric.get("denominator")),
+        ):
             if spec is None:
                 continue
             if _row_matches_spec(
@@ -1013,8 +1031,11 @@ def collect_covenant_inputs(
                 period=period,
                 parties=parties,
                 group_scope=group_scope,
+                covenant_context=covenant_context,
+                leg=leg_name,
             ):
                 matched_spec = spec
+                matched_leg = leg_name
                 break
         if matched_spec is None:
             continue
@@ -1033,6 +1054,8 @@ def collect_covenant_inputs(
                     matched_spec,
                     parties=parties,
                     group_scope=group_scope,
+                    covenant_context=covenant_context,
+                    leg=matched_leg,
                 ),
             }
         )
@@ -1051,11 +1074,22 @@ def relevant_row_indices(
     metric = covenant["metric"]
     scope = metric.get("scope", "BORROWER")
     group_scope = scope == "GROUP"
-    specs: list[dict[str, Any] | None]
+    covenant_context = {
+        "title": covenant.get("title"),
+        "notes": metric.get("notes"),
+        "metric": metric,
+    }
+    specs: list[tuple[str, dict[str, Any] | None]]
     if metric.get("kind") == "RATIO":
-        specs = [metric["numerator"], metric.get("denominator")]
+        specs = [
+            ("numerator", metric["numerator"]),
+            ("denominator", metric.get("denominator")),
+        ]
     else:
-        specs = [metric["numerator"], metric.get("denominator")]
+        specs = [
+            ("numerator", metric["numerator"]),
+            ("denominator", metric.get("denominator")),
+        ]
 
     indices: list[int] = []
     for index, row in enumerate(ledger):
@@ -1066,7 +1100,7 @@ def relevant_row_indices(
         if not _in_period(row, period):
             continue
         matched = False
-        for spec in specs:
+        for leg_name, spec in specs:
             if spec is None:
                 continue
             if _row_matches_spec(
@@ -1075,6 +1109,8 @@ def relevant_row_indices(
                 period=period,
                 parties=parties,
                 group_scope=group_scope,
+                covenant_context=covenant_context,
+                leg=leg_name,
             ):
                 matched = True
                 break

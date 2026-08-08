@@ -5,9 +5,26 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any, Literal, Self
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
-from agent.parsing.numbers import normalize_decimal
+from agent.parsing.categories import derive_leg_sign
+from agent.parsing.numbers import normalize_decimal, normalize_optional_decimal
+
+LEDGER_CATEGORIES_CONTEXT_KEY = "ledger_categories"
+
+RELATED_PARTY_MARKERS = (
+    "связан",
+    "аффилир",
+    "related party",
+    "related-party",
+    "affiliate",
+    "ограниченные платежи",
+)
+
+
+def _text_refers_to_related_parties(text: str) -> bool:
+    normalized = str(text or "").casefold()
+    return any(marker in normalized for marker in RELATED_PARTY_MARKERS)
 
 
 class Direction(str, Enum):
@@ -62,8 +79,14 @@ def _parse_date_field(value: Any, *, field_name: str) -> date:
 
 
 class CategorySpecExtract(BaseModel):
+    """Category leg using closed ledger vocabulary (include_keywords = category slugs)."""
+
     include_keywords: list[str] = Field(
-        description="Keywords or category labels included in the numerator or sum.",
+        description=(
+            "One or more ledger category slugs included in this leg. "
+            "For related-party payment legs, this may be empty; counterparty "
+            "resolution from stage 4b applies instead of category filtering."
+        ),
     )
     include_keywords_quote: str = Field(
         description="Verbatim quote from the clause naming included categories or keywords.",
@@ -76,10 +99,6 @@ class CategorySpecExtract(BaseModel):
         default="",
         description="Verbatim quote for exclusions, or empty string if none stated.",
     )
-    sign: CategorySign = Field(description="Cash-flow sign of included amounts.")
-    sign_quote: str = Field(
-        description="Verbatim quote indicating inflows, outflows, or both.",
-    )
     apply_reclass: bool = Field(
         description="Whether auditor reclassifications apply to this category leg.",
     )
@@ -87,10 +106,36 @@ class CategorySpecExtract(BaseModel):
         description="Verbatim quote about auditor reclassifications for this leg.",
     )
 
-    @field_validator("sign", mode="before")
+    @model_validator(mode="after")
+    def _validate_category_vocabulary(self) -> Self:
+        if _text_refers_to_related_parties(self.include_keywords_quote):
+            return self
+        if not self.include_keywords:
+            raise ValueError("include_keywords must contain at least one ledger category")
+        return self
+
+    @field_validator("include_keywords")
     @classmethod
-    def _normalize_sign(cls, value: Any) -> Any:
-        return _uppercase_str(value)
+    def _validate_include_keywords(cls, value: list[str], info: ValidationInfo) -> list[str]:
+        quote = ""
+        if isinstance(info.data, dict):
+            quote = str(info.data.get("include_keywords_quote") or "")
+        if _text_refers_to_related_parties(quote):
+            return value
+        context = info.context or {}
+        allowed = context.get(LEDGER_CATEGORIES_CONTEXT_KEY)
+        if allowed is None:
+            return value
+        if not value:
+            return value
+        allowed_set = {str(category) for category in allowed}
+        invalid = sorted({str(keyword) for keyword in value if str(keyword) not in allowed_set})
+        if invalid:
+            raise ValueError(
+                "include_keywords must be chosen from the ledger category list "
+                f"{sorted(allowed_set)}; invalid: {invalid}",
+            )
+        return value
 
 
 class MetricSpecExtract(BaseModel):
@@ -173,7 +218,10 @@ class SpringingConditionExtract(BaseModel):
     operator_quote: str = Field(
         description="Verbatim quote containing the comparison operator for the trigger.",
     )
-    value: Decimal
+    value: Decimal | None = Field(
+        default=None,
+        description="Trigger threshold value; null when the clause states no value.",
+    )
     value_quote: str = Field(
         description="Verbatim quote containing the trigger threshold value.",
     )
@@ -184,9 +232,7 @@ class SpringingConditionExtract(BaseModel):
     @field_validator("value", mode="before")
     @classmethod
     def _parse_value(cls, value: Any) -> Any:
-        if value is None:
-            return value
-        return normalize_decimal(value, field_name="springing.value")
+        return normalize_optional_decimal(value, field_name="springing.value")
 
 
 def _infer_metric_kind(metric: dict[str, Any], covenant_data: dict[str, Any]) -> str:
@@ -269,6 +315,14 @@ class CovenantExtractBase(BaseModel):
     @classmethod
     def _parse_period_dates(cls, value: Any) -> Any:
         return _parse_date_field(value, field_name="period")
+
+    @model_validator(mode="after")
+    def _drop_valueless_springing(self) -> Self:
+        # A trigger without a value is untestable; treat the condition as absent.
+        springing = getattr(self, "springing", None)
+        if springing is not None and springing.value is None:
+            self.springing = None
+        return self
 
     @model_validator(mode="before")
     @classmethod

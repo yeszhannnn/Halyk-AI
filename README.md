@@ -64,10 +64,10 @@ skipped when its output already exists, so a failed run resumes rather than rest
 | 1 · Ingest | text per page, per-page scan detection, page rendering | `01_inventory.json` |
 | 2 · Classify | document type from content markers; filenames are opaque hashes | `02_classified.json` |
 | 3 · Bind | borrower ↔ documents, resolved through the ledger, never by company name | `03_bound.json` |
-| 4a · Covenants | thresholds, comparison direction, metric definitions, springing conditions | `04a_covenants.json` |
 | 4b · Classification tables | ownership and pledged-asset tables with the rule stated beneath each | `04b_parties.json` |
 | 4c · Adjustments | eight kinds of auditor adjustment, from text and from image pages | `04c_adjustments.json` |
-| 5 · Ledger | filter, apply adjustments in order, convert currency | `05_ledger.parquet` |
+| 5 · Ledger | filter, apply adjustments in order, convert currency; emits category vocabulary | `05_ledger.parquet`, `05_ledger.json` |
+| 4a · Covenants | thresholds, comparison direction, metric definitions, springing conditions (category enum from stage 5) | `04a_covenants.json` |
 | 6 · Evaluate | applicability gate, full-precision comparison, counterfactual evidence | `06_evaluated.json` |
 | 7 · Emit | evidence trace, then a pure projection into the submission template | `trace.json`, `submission.json` |
 

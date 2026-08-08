@@ -1,9 +1,81 @@
+import contextlib
+import contextvars
+import logging
 import re
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
 
+logger = logging.getLogger(__name__)
+
 _TRAILING_MULTIPLIER_RE = re.compile(r"[xх×X]\s*$")
 _PERCENT_SUFFIX_RE = re.compile(r"%\s*$")
+
+# Strings the model uses to signal "value not present in the document".
+# Matched case-insensitively after whitespace normalisation.
+ABSENT_SENTINELS: frozenset[str] = frozenset(
+    {
+        "",
+        "<unknown>",
+        "unknown",
+        "n/a",
+        "null",
+        "none",
+        "not found",
+        "не найдено",
+    }
+)
+
+ABSENT_SENTINEL_MESSAGE = "absent sentinel value"
+
+# Stage code installs a sink here to learn which fields were coerced to None.
+_absent_sink: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar(
+    "absent_value_sink",
+    default=None,
+)
+
+
+class AbsentValueError(ValueError):
+    """Raised when a required numeric field comes back as an absence sentinel."""
+
+    def __init__(self, field_name: str, raw: Any) -> None:
+        super().__init__(f"{ABSENT_SENTINEL_MESSAGE} for {field_name}: {raw!r}")
+        self.field_name = field_name
+        self.raw = raw
+
+
+def is_absent_sentinel(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    return " ".join(value.split()).casefold() in ABSENT_SENTINELS
+
+
+def _record_absent(field_name: str) -> None:
+    sink = _absent_sink.get()
+    if sink is not None:
+        sink.append(field_name)
+    logger.warning("absent sentinel coerced to None for field %s", field_name)
+
+
+@contextlib.contextmanager
+def capture_absent_values():
+    """Collect field names coerced to None by sentinel values within the block."""
+    sink: list[str] = []
+    token = _absent_sink.set(sink)
+    try:
+        yield sink
+    finally:
+        _absent_sink.reset(token)
+
+
+def exception_mentions_absent_sentinel(exc: BaseException) -> bool:
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if ABSENT_SENTINEL_MESSAGE in str(current):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def parse_money(text: str) -> Decimal:
@@ -69,12 +141,22 @@ def normalize_decimal(value: Any, *, field_name: str = "value") -> Decimal:
         return Decimal(str(value))
     if isinstance(value, str):
         cleaned = value.strip()
-        if not cleaned:
-            raise ValueError(f"{field_name} must not be empty")
+        if is_absent_sentinel(cleaned):
+            raise AbsentValueError(field_name, value)
         cleaned = _TRAILING_MULTIPLIER_RE.sub("", cleaned).strip()
         cleaned = _PERCENT_SUFFIX_RE.sub("", cleaned).strip()
         return parse_money(cleaned)
     raise ValueError(f"{field_name} must be numeric, got {type(value).__name__}")
+
+
+def normalize_optional_decimal(value: Any, *, field_name: str = "value") -> Decimal | None:
+    """Parse model output into Decimal, treating absence sentinels as None."""
+    if value is None:
+        return None
+    if isinstance(value, str) and is_absent_sentinel(value):
+        _record_absent(field_name)
+        return None
+    return normalize_decimal(value, field_name=field_name)
 
 
 def round_half_up(value, places: int) -> Decimal:

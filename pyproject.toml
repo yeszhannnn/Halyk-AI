@@ -15,6 +15,7 @@ dependencies = [
     "pydantic",
     "instructor",
     "openai",
+    "anthropic",
     "python-dotenv",
     "pytest",
 ]
@@ -28,3 +29,4 @@ include = ["agent*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]

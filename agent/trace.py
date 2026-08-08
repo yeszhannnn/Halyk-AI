@@ -14,7 +14,7 @@ from typing import Any
 
 import duckdb
 
-from agent.config import CONTACT_EMAIL, MODEL_ID, TEMPERATURE
+from agent.config import CONTACT_EMAIL, LLM_PROVIDER, MODEL_ID, TEMPERATURE
 from agent.template import load_template, template_cells
 from agent.evidence.counterfactual import evidence_search
 from agent.evidence.quotes import verify_quote
@@ -355,7 +355,7 @@ def _run_block(
             "pdf_count": int((classified.get("summary") or {}).get("pdf_total", 0)),
             "ledger_rows": ledger_rows,
         },
-        "models": [{"id": MODEL_ID, "temperature": TEMPERATURE}],
+        "models": [{"provider": LLM_PROVIDER, "id": MODEL_ID, "temperature": TEMPERATURE}],
         "counters": {
             "classified_noise": classified_noise,
             "loans_active": loans_active,

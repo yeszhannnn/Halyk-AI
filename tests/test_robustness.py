@@ -183,6 +183,9 @@ def _run_stages_4_to_7(work_dir: Path) -> None:
     _clear_tail_artifacts(work_dir)
     s4_extract.run(work_dir=work_dir)
     s5_ledger.run(work_dir=work_dir)
+    from agent.stages import s4a_covenants
+
+    s4a_covenants.run(work_dir=work_dir)
     s6_evaluate.run(work_dir=work_dir)
     started_at = datetime.now(timezone.utc).isoformat()
     s7_emit.run(

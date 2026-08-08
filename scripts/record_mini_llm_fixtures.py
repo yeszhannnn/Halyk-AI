@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from agent.llm.client import set_record_dir
-from agent.stages import s1_ingest, s2_classify, s3_bind, s4_extract, s5_ledger, s6_evaluate, s7_emit
+from agent.stages import s1_ingest, s2_classify, s3_bind, s4_extract, s4a_covenants, s5_ledger, s6_evaluate, s7_emit
 
 ROOT = Path(__file__).resolve().parents[1]
 MINI = ROOT / "tests" / "fixtures" / "mini"
@@ -28,6 +28,7 @@ def main() -> None:
     s3_bind.run(work_dir=work)
     s4_extract.run(work_dir=work)
     s5_ledger.run(work_dir=work)
+    s4a_covenants.run(work_dir=work)
     s6_evaluate.run(work_dir=work)
     started_at = datetime.now(timezone.utc).isoformat()
     s7_emit.run(

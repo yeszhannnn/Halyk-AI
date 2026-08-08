@@ -15,7 +15,7 @@ from agent.llm.client import LLMClient
 from agent.llm.schemas.adjustments import AdjustmentExtract, VisionAdjustmentsExtract
 from agent.llm.vision_guard import complete_vision_dual
 from agent.models import Provenance
-from agent.parsing.numbers import normalize_decimal
+from agent.parsing.numbers import capture_absent_values, normalize_decimal
 from agent.shape import is_canonical_open_dataset
 from agent.stages import StageResult
 from agent.stages.s4b_parties import normalize_counterparty
@@ -688,14 +688,25 @@ async def _run_async(work_dir: Path) -> StageResult:
             for segment in segments:
                 marker = segment["marker"]
                 adjustment_id = _adjustment_id(scenario_id, marker)
-                extracted, verification, segment_source_kind = await _classify_segment(
-                    client,
-                    scenario_id=scenario_id,
-                    doc_id=doc_id,
-                    marker=marker,
-                    segment_text=segment["text"],
-                    pages=pages,
-                )
+                with capture_absent_values() as absent_fields:
+                    extracted, verification, segment_source_kind = await _classify_segment(
+                        client,
+                        scenario_id=scenario_id,
+                        doc_id=doc_id,
+                        marker=marker,
+                        segment_text=segment["text"],
+                        pages=pages,
+                    )
+                for field_name in absent_fields:
+                    conflicts.append(
+                        {
+                            "kind": "ABSENT_VALUE",
+                            "field": field_name,
+                            "scenario_id": scenario_id,
+                            "doc_id": doc_id,
+                            "marker": marker,
+                        },
+                    )
                 if extracted.kind.strip().upper() == "UNRECOGNISED":
                     unrecognised.append(
                         {
@@ -729,14 +740,24 @@ async def _run_async(work_dir: Path) -> StageResult:
                 if page_paths:
                     page_numbers = [page for page, _ in page_paths]
                     image_paths = [path for _, path in page_paths]
-                    vision_items, vision_source_kind, digit_mismatches = await _classify_vision_pages(
-                        client,
-                        scenario_id=scenario_id,
-                        doc_id=doc_id,
-                        page_numbers=page_numbers,
-                        image_paths=image_paths,
-                        pages=pages,
-                    )
+                    with capture_absent_values() as absent_fields:
+                        vision_items, vision_source_kind, digit_mismatches = await _classify_vision_pages(
+                            client,
+                            scenario_id=scenario_id,
+                            doc_id=doc_id,
+                            page_numbers=page_numbers,
+                            image_paths=image_paths,
+                            pages=pages,
+                        )
+                    for field_name in absent_fields:
+                        conflicts.append(
+                            {
+                                "kind": "ABSENT_VALUE",
+                                "field": field_name,
+                                "scenario_id": scenario_id,
+                                "doc_id": doc_id,
+                            },
+                        )
                     review.extend(digit_mismatches)
                     conflicts.extend(digit_mismatches)
                     for index, item in enumerate(vision_items, start=1):

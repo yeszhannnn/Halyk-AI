@@ -18,12 +18,19 @@ from agent.llm.schemas.covenants import (
     CovenantExtractBase,
     CovenantExtractNoSpringing,
     CovenantExtractWithSpringing,
+    LEDGER_CATEGORIES_CONTEXT_KEY,
     MetricKind,
     MetricSpecExtract,
     SpringingConditionExtract,
+    _text_refers_to_related_parties,
 )
 from agent.models import CategorySpec, Covenant, MetricSpec, Provenance, SpringingCondition
-from agent.parsing.numbers import normalize_decimal
+from agent.parsing.categories import derive_leg_sign
+from agent.parsing.numbers import (
+    ABSENT_SENTINEL_MESSAGE,
+    capture_absent_values,
+    normalize_decimal,
+)
 from agent.stages import StageResult
 from agent.template import load_template, template_cells
 
@@ -83,6 +90,12 @@ Rules:
 - metric.scope is BORROWER unless the clause explicitly uses group/consolidated/Группы scope.
 - For metric.kind RATIO: provide numerator and denominator category legs.
 - For metric.kind SUM or COUNT: provide a single category leg (not numerator/denominator).
+- Each category leg's include_keywords must contain one or more slugs from the ledger
+  category list provided in the prompt. Never invent phrases or translate contract language.
+- Related-party payment legs (numerator for payments to affiliates/связанные стороны) do not
+  use ledger categories: leave include_keywords empty and quote the related-party clause text
+  in include_keywords_quote. Counterparty filtering is resolved from stage 4b.
+- Cash-flow sign is derived from category type in code; do not output sign fields.
 - period_start and period_end must reflect the measurement period stated in the clause.
   Most covenants use 2025-01-01 through 2025-12-31; some specify a sub-period (e.g. fourth quarter).
 - Quotes must be exact contiguous substrings from the clause; do not paraphrase or normalize numbers.
@@ -130,7 +143,24 @@ def _springing_trigger_label(text: str) -> tuple[str, str] | None:
     return None
 
 
-def _metric_primary_category(metric: MetricSpecExtract) -> CategorySpecExtract:
+def _load_ledger_categories(work_dir: Path) -> tuple[dict[str, list[str]], list[str]]:
+    path = work_dir / "05_ledger.json"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"s4a_covenants requires ledger categories from stage 5: {path} not found",
+        )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    by_scenario = {
+        str(scenario_id): list(categories)
+        for scenario_id, categories in (payload.get("categories_by_scenario") or {}).items()
+    }
+    global_categories = list(payload.get("categories") or [])
+    if not global_categories and by_scenario:
+        global_categories = sorted({category for cats in by_scenario.values() for category in cats})
+    return by_scenario, global_categories
+
+
+def _metric_primary_category(metric: MetricSpecExtract | Any) -> Any:
     if metric.kind == MetricKind.RATIO:
         assert metric.numerator is not None
         return metric.numerator
@@ -138,7 +168,7 @@ def _metric_primary_category(metric: MetricSpecExtract) -> CategorySpecExtract:
     return metric.category
 
 
-def _metric_category_legs(metric: MetricSpecExtract) -> list[tuple[str, CategorySpecExtract]]:
+def _metric_category_legs(metric: MetricSpecExtract | Any) -> list[tuple[str, Any]]:
     if metric.kind == MetricKind.RATIO:
         assert metric.numerator is not None and metric.denominator is not None
         return [
@@ -315,7 +345,6 @@ def _quote_checks(result: CovenantExtract, verification_text: str) -> list[tuple
                     category.include_keywords_quote,
                     verification_text,
                 ),
-                (f"metric_{leg}_sign", category.sign_quote, verification_text),
                 (
                     f"metric_{leg}_reclass",
                     category.apply_reclass_quote,
@@ -359,11 +388,12 @@ def _springing_quote_checks(
     return checks
 
 
-def _category_from_extract(spec: CategorySpecExtract) -> CategorySpec:
+def _category_from_extract(spec: CategorySpecExtract | Any) -> CategorySpec:
+    categories = [str(keyword) for keyword in spec.include_keywords]
     return CategorySpec(
-        include_keywords=spec.include_keywords,
+        include_keywords=categories,
         exclude_keywords=spec.exclude_keywords,
-        sign=spec.sign.value,
+        sign=derive_leg_sign(categories),
         apply_reclass=spec.apply_reclass,
     )
 
@@ -548,7 +578,6 @@ def _placeholder_covenant(scenario_id: str, slot: str) -> dict[str, Any]:
             "numerator": {
                 "include_keywords": [],
                 "exclude_keywords": [],
-                "sign": "OUTFLOW",
                 "apply_reclass": True,
             },
             "denominator": None,
@@ -569,13 +598,27 @@ def _quote_states_zero_threshold(quote: str) -> bool:
 
 
 def _validate_category_spec(
-    spec: CategorySpecExtract,
+    spec: CategorySpecExtract | Any,
     *,
     leg: str,
     scenario_id: str,
     slot: str,
+    allowed_categories: set[str],
+    covenant: CovenantExtract | None = None,
 ) -> list[dict[str, Any]]:
     issues: list[dict[str, Any]] = []
+    related_party_leg = (
+        leg in {"primary", "numerator", "category"}
+        and covenant is not None
+        and (
+            _text_refers_to_related_parties(covenant.title)
+            or _text_refers_to_related_parties(covenant.notes)
+            or _text_refers_to_related_parties(spec.include_keywords_quote)
+        )
+    )
+    if related_party_leg:
+        return issues
+
     if not spec.include_keywords:
         issues.append(
             {
@@ -587,33 +630,23 @@ def _validate_category_spec(
         )
         return issues
 
-    keywords_text = " ".join(spec.include_keywords).casefold()
-    sign = spec.sign.value
-    if any(token in keywords_text for token in ("капитальн", "capex", "capital expenditure")):
-        if sign != "OUTFLOW":
-            issues.append(
-                {
-                    "kind": "CAPEX_SIGN_MISMATCH",
-                    "scenario_id": scenario_id,
-                    "slot": f"6.{slot}",
-                    "leg": leg,
-                    "sign": sign,
-                },
-            )
-    if any(
-        token in keywords_text
-        for token in ("операционн", "opex", "operating expense", "аренд")
-    ):
-        if sign not in {"OUTFLOW", "BOTH"}:
-            issues.append(
-                {
-                    "kind": "OPEX_SIGN_MISMATCH",
-                    "scenario_id": scenario_id,
-                    "slot": f"6.{slot}",
-                    "leg": leg,
-                    "sign": sign,
-                },
-            )
+    invalid = sorted(
+        {
+            str(keyword)
+            for keyword in spec.include_keywords
+            if str(keyword) not in allowed_categories
+        },
+    )
+    if invalid:
+        issues.append(
+            {
+                "kind": "INVALID_LEDGER_CATEGORY",
+                "scenario_id": scenario_id,
+                "slot": f"6.{slot}",
+                "leg": leg,
+                "invalid_categories": invalid,
+            },
+        )
     return issues
 
 
@@ -622,6 +655,7 @@ def _validate_covenant_extract(
     *,
     scenario_id: str,
     slot: str,
+    allowed_categories: set[str],
 ) -> list[dict[str, Any]]:
     issues: list[dict[str, Any]] = []
     threshold = extracted.threshold
@@ -704,6 +738,8 @@ def _validate_covenant_extract(
             leg="primary",
             scenario_id=scenario_id,
             slot=slot,
+            allowed_categories=allowed_categories,
+            covenant=extracted,
         ),
     )
     if extracted.metric.kind == MetricKind.RATIO:
@@ -714,6 +750,8 @@ def _validate_covenant_extract(
                 leg="denominator",
                 scenario_id=scenario_id,
                 slot=slot,
+                allowed_categories=allowed_categories,
+                covenant=extracted,
             ),
         )
     if extracted.springing is not None:
@@ -724,6 +762,8 @@ def _validate_covenant_extract(
                 leg="springing_primary",
                 scenario_id=scenario_id,
                 slot=slot,
+                allowed_categories=allowed_categories,
+                covenant=extracted,
             ),
         )
         if springing_metric.kind == MetricKind.RATIO:
@@ -734,6 +774,8 @@ def _validate_covenant_extract(
                     leg="springing_denominator",
                     scenario_id=scenario_id,
                     slot=slot,
+                    allowed_categories=allowed_categories,
+                    covenant=extracted,
                 ),
             )
 
@@ -784,6 +826,7 @@ async def _extract_covenant_item(
     slot: str,
     item_text: str,
     verification_text: str,
+    ledger_categories: list[str],
     validation_feedback: str | None = None,
     threshold_candidates: list[tuple[Decimal, str]] | None = None,
     expect_springing: bool | None = None,
@@ -803,11 +846,15 @@ async def _extract_covenant_item(
     response_model: type[CovenantExtractBase] = (
         CovenantExtractWithSpringing if expect_springing else CovenantExtractNoSpringing
     )
+    category_list = ", ".join(sorted(ledger_categories))
+    validation_context = {LEDGER_CATEGORIES_CONTEXT_KEY: ledger_categories}
 
     for attempt in range(1, MAX_EXTRACTION_ATTEMPTS + 1):
         user_content = (
             f"Scenario: {scenario_id}\n"
             f"Slot: 6.{slot}\n\n"
+            f"Ledger categories (include_keywords must be chosen only from this list): "
+            f"{category_list}\n\n"
             "Extract the covenant from this clause text:\n\n"
             f"{item_text}"
         )
@@ -843,6 +890,7 @@ async def _extract_covenant_item(
                     ),
                     verification_text,
                 ),
+                validation_context=validation_context,
                 **({"use_cache": False} if active_candidates else {}),
             )
             extracted = _to_covenant_extract(
@@ -857,6 +905,15 @@ async def _extract_covenant_item(
                 cause=exc,
             )
         except LLMValidationError as exc:
+            # A sentinel for a required field is a definitive absence signal;
+            # re-asking the model cannot produce a number that is not there.
+            if ABSENT_SENTINEL_MESSAGE in str(exc):
+                _raise_extraction_failure(
+                    scenario_id=scenario_id,
+                    slot=slot,
+                    message=str(exc),
+                    cause=exc,
+                )
             if attempt >= MAX_EXTRACTION_ATTEMPTS:
                 _raise_extraction_failure(
                     scenario_id=scenario_id,
@@ -869,6 +926,27 @@ async def _extract_covenant_item(
 
         if llm_client.REPLAY_DIR is not None:
             break
+
+        category_issues = _validate_covenant_extract(
+            extracted,
+            scenario_id=scenario_id,
+            slot=slot,
+            allowed_categories=set(ledger_categories),
+        )
+        invalid_categories = [
+            issue
+            for issue in category_issues
+            if issue.get("kind") == "INVALID_LEDGER_CATEGORY"
+        ]
+        if invalid_categories:
+            if attempt >= MAX_EXTRACTION_ATTEMPTS:
+                break
+            feedback = (
+                "Category include_keywords must use ledger category slugs from "
+                f"{sorted(ledger_categories)}; invalid: "
+                f"{invalid_categories[0].get('invalid_categories')}"
+            )
+            continue
 
         anchor_issue = _threshold_anchor_issue(extracted, candidates)
         if anchor_issue is None:
@@ -904,6 +982,7 @@ async def _process_scenario(
     scenario_id: str,
     doc_id: str,
     pages: list[str],
+    ledger_categories: list[str],
     conflicts: list[dict[str, Any]],
 ) -> list[tuple[Covenant, dict[str, bool], list[dict[str, Any]]]]:
     section = _extract_article_6(pages)
@@ -913,18 +992,31 @@ async def _process_scenario(
     for slot in SLOTS:
         item_text = items[slot]
         fallback_page, _, _ = _page_span_for_text(pages, item_text[:120])
-        extracted, verification = await _extract_covenant_item(
-            client,
-            scenario_id=scenario_id,
-            slot=slot,
-            item_text=item_text,
-            verification_text=item_text,
-        )
+        with capture_absent_values() as absent_fields:
+            extracted, verification = await _extract_covenant_item(
+                client,
+                scenario_id=scenario_id,
+                slot=slot,
+                item_text=item_text,
+                verification_text=item_text,
+                ledger_categories=ledger_categories,
+            )
+        for field_name in absent_fields:
+            conflicts.append(
+                {
+                    "kind": "ABSENT_VALUE",
+                    "field": field_name,
+                    "scenario_id": scenario_id,
+                    "doc_id": doc_id,
+                    "slot": f"6.{slot}",
+                },
+            )
 
         validation_issues = _validate_covenant_extract(
             extracted,
             scenario_id=scenario_id,
             slot=slot,
+            allowed_categories=set(ledger_categories),
         )
         conflicts.extend(validation_issues)
 
@@ -955,6 +1047,7 @@ async def _run_async(work_dir: Path) -> StageResult:
     inventory = json.loads((work_dir / "01_inventory.json").read_text(encoding="utf-8"))
     bound = json.loads((work_dir / "03_bound.json").read_text(encoding="utf-8"))
     template = load_template(work_dir)
+    categories_by_scenario, global_categories = _load_ledger_categories(work_dir)
 
     async with LLMClient() as client:
         conflicts: list[dict[str, Any]] = []
@@ -970,11 +1063,13 @@ async def _run_async(work_dir: Path) -> StageResult:
                     conflicts.append({"kind": "EXTRA_SCENARIO", "scenario_id": scenario_id})
                 continue
             pages = inventory["documents"][loan_doc_id]["pages"]
+            scenario_categories = categories_by_scenario.get(scenario_id) or global_categories
             scenario_results = await _process_scenario(
                 client,
                 scenario_id=scenario_id,
                 doc_id=loan_doc_id,
                 pages=pages,
+                ledger_categories=scenario_categories,
                 conflicts=conflicts,
             )
             extracted_by_scenario[scenario_id] = {
@@ -1018,9 +1113,8 @@ async def _run_async(work_dir: Path) -> StageResult:
             "USD_THRESHOLD_TOO_SMALL",
             "SPRINGING_VALUE_EQUALS_THRESHOLD",
             "EMPTY_CATEGORY_KEYWORDS",
+            "INVALID_LEDGER_CATEGORY",
             "THRESHOLD_UNIT_KIND_MISMATCH",
-            "CAPEX_SIGN_MISMATCH",
-            "OPEX_SIGN_MISMATCH",
         }
     }
     if extracted_covenants:

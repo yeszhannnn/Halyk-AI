@@ -11,7 +11,13 @@ import duckdb
 
 from agent.degrade import SLOT_STATUS_PRIOR, _degraded_finding
 from agent.evidence.counterfactual import find_evidence
-from agent.metrics.engine import breaches, compare_values, compute_covenant_metric
+from agent.metrics.engine import (
+    breaches,
+    compare_values,
+    compute_covenant_metric,
+    EMPTY_LEG,
+    _requires_related_party_filter,
+)
 from agent.parsing.numbers import round_half_up
 from agent.stages import StageResult
 from agent.template import load_template, template_cells
@@ -62,11 +68,23 @@ def _evaluate_cell(
         finding["flags"] = ["DEGRADED"]
         return finding
 
+    if _requires_related_party_filter(covenant) and (
+        parties is None or parties.get("threshold_pct") is None
+    ):
+        # No relatedness threshold was extracted for this scenario; the
+        # related-party leg cannot be computed. Degrade instead of crashing.
+        finding = _degraded_finding(covenant)
+        finding["flags"] = ["DEGRADED", "ABSENT_RELATEDNESS_THRESHOLD"]
+        return finding
+
     threshold = Decimal(str(covenant["threshold"]))
     direction = covenant["direction"]
     flags: list[str] = []
     strategy = "computed"
     springing = covenant.get("springing")
+    status: str | None = None
+    computed = False
+    actual = Decimal("0")
 
     try:
         metric_metadata: dict[str, Any] = {}
@@ -79,16 +97,20 @@ def _evaluate_cell(
             metadata=metric_metadata,
         )
         computed = True
-        if metric_metadata.get("strategy"):
-            strategy = str(metric_metadata["strategy"])
         flags.extend(metric_metadata.get("flags") or [])
+        if EMPTY_LEG in flags:
+            computed = False
+            status = SLOT_STATUS_PRIOR.get(slot, "COMPLIANT")
+            strategy = "empty_leg_slot_prior"
+            actual = Decimal("0")
+        elif metric_metadata.get("strategy"):
+            strategy = str(metric_metadata["strategy"])
     except Exception:
         actual = threshold
         computed = False
         strategy = "actual_threshold_fallback"
 
-    status: str | None = None
-    if springing:
+    if springing and status is None:
         trigger_metric = springing["metric"]
         trigger_cov = {
             **covenant,
@@ -121,7 +143,7 @@ def _evaluate_cell(
             status = SLOT_STATUS_PRIOR.get(slot, "COMPLIANT")
             strategy = "status_slot_prior"
 
-    if not computed:
+    if not computed and strategy != "empty_leg_slot_prior":
         actual = threshold if strategy == "actual_threshold_fallback" else Decimal("0")
         if strategy == "status_slot_prior":
             actual = Decimal("0")
@@ -189,14 +211,25 @@ def run(*, work_dir: Path) -> StageResult:
             ),
         )
 
+    review = [
+        {
+            "kind": "ABSENT_RELATEDNESS_THRESHOLD",
+            "scenario_id": finding["scenario_id"],
+            "slot": finding["slot"],
+        }
+        for finding in findings
+        if "ABSENT_RELATEDNESS_THRESHOLD" in (finding.get("flags") or [])
+    ]
     payload = {
         "findings": findings,
+        "review": review,
         "summary": {
             "count": len(findings),
             "breach_count": sum(1 for f in findings if f["status"] == "BREACH"),
             "empty_leg_count": sum(
                 1 for finding in findings if "EMPTY_LEG" in (finding.get("flags") or [])
             ),
+            "review_count": len(review),
         },
     }
     (work_dir / "06_evaluated.json").write_text(

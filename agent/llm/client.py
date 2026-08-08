@@ -13,12 +13,27 @@ from pathlib import Path
 from typing import Any, Callable, TypeVar
 
 import instructor
+from instructor import Mode
 from instructor.core import InstructorRetryException, ResponseParsingError
+from instructor.v2.providers.anthropic import from_anthropic
+from anthropic import APIConnectionError as AnthropicAPIConnectionError
+from anthropic import APITimeoutError as AnthropicAPITimeoutError
+from anthropic import AsyncAnthropic
+from anthropic import RateLimitError as AnthropicRateLimitError
 from openai import APIConnectionError, APITimeoutError, AsyncOpenAI, RateLimitError
 from pydantic import BaseModel, ValidationError as PydanticValidationError
 
-from agent.config import BUDGET_USD, MAX_CONCURRENT, MODEL_ID, OPENAI_SEED, TEMPERATURE
+from agent.config import (
+    ANTHROPIC_MAX_TOKENS,
+    BUDGET_USD,
+    LLM_PROVIDER,
+    MAX_CONCURRENT,
+    MODEL_ID,
+    OPENAI_SEED,
+    TEMPERATURE,
+)
 from agent.llm.token_bucket import get_token_bucket
+from agent.parsing.numbers import exception_mentions_absent_sentinel
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -41,7 +56,18 @@ _RETRY_BODY_HINT_MILLISECONDS = re.compile(
 MODEL_PRICING_PER_MILLION: dict[str, tuple[Decimal, Decimal]] = {
     "gpt-4o": (Decimal("2.50"), Decimal("10.00")),
     "gpt-4o-mini": (Decimal("0.15"), Decimal("0.60")),
+    "claude-haiku-4-5-20251001": (Decimal("1.00"), Decimal("5.00")),
 }
+
+_TRANSPORT_ERRORS = (
+    RateLimitError,
+    APIConnectionError,
+    APITimeoutError,
+    AnthropicRateLimitError,
+    AnthropicAPIConnectionError,
+    AnthropicAPITimeoutError,
+)
+_RATE_LIMIT_ERRORS = (RateLimitError, AnthropicRateLimitError)
 
 
 class BudgetExceededError(RuntimeError):
@@ -168,12 +194,14 @@ def _estimate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> De
 
 def _cache_key(
     *,
+    provider: str,
     model: str,
     messages: list[dict[str, Any]],
     params: dict[str, Any],
     image_digests: list[str] | None = None,
 ) -> str:
     payload = {
+        "provider": provider,
         "model": model,
         "messages": messages,
         "params": params,
@@ -189,16 +217,66 @@ def _image_digest(image_path: Path) -> str:
     return hashlib.sha256(image_path.read_bytes()).hexdigest()
 
 
-def _encode_image_data_url(image_path: Path) -> str:
+def _image_media_type(image_path: Path) -> str:
     suffix = image_path.suffix.lower()
-    media_type = {
+    return {
         ".png": "image/png",
         ".jpg": "image/jpeg",
         ".jpeg": "image/jpeg",
         ".webp": "image/webp",
     }.get(suffix, "image/png")
+
+
+def vision_image_block(image_path: Path) -> dict[str, Any]:
+    """Return the provider-specific vision content block for one image."""
+    media_type = _image_media_type(image_path)
     encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
-    return f"data:{media_type};base64,{encoded}"
+    if LLM_PROVIDER == "anthropic":
+        return {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": encoded,
+            },
+        }
+    return {
+        "type": "image_url",
+        "image_url": {"url": f"data:{media_type};base64,{encoded}"},
+    }
+
+
+def _build_request_params(**params: Any) -> dict[str, Any]:
+    request_params = {
+        "temperature": TEMPERATURE,
+        **params,
+    }
+    if LLM_PROVIDER == "openai":
+        request_params["seed"] = OPENAI_SEED
+    else:
+        request_params.setdefault("max_tokens", ANTHROPIC_MAX_TOKENS)
+    return request_params
+
+
+def _read_token_field(usage: Any, *field_names: str) -> int | None:
+    for field_name in field_names:
+        if not hasattr(usage, field_name):
+            continue
+        value = getattr(usage, field_name)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return int(value)
+    return None
+
+
+def _usage_fields(usage: Any) -> dict[str, int]:
+    prompt_tokens = _read_token_field(usage, "prompt_tokens", "input_tokens") or 0
+    completion_tokens = _read_token_field(usage, "completion_tokens", "output_tokens") or 0
+    total_tokens = _read_token_field(usage, "total_tokens") or (prompt_tokens + completion_tokens)
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+    }
 
 
 def _cache_path(cache_key: str) -> Path:
@@ -238,9 +316,10 @@ def _write_cache(
 
 
 def _record_usage(model: str, usage: Any, counter: RunCounter) -> Decimal:
-    prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
-    completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
-    total_tokens = int(getattr(usage, "total_tokens", prompt_tokens + completion_tokens) or 0)
+    usage_fields = _usage_fields(usage)
+    prompt_tokens = usage_fields["prompt_tokens"]
+    completion_tokens = usage_fields["completion_tokens"]
+    total_tokens = usage_fields["total_tokens"]
     cost = _estimate_cost(model, prompt_tokens, completion_tokens)
 
     counter.prompt_tokens += prompt_tokens
@@ -287,7 +366,7 @@ def _estimate_request_tokens(messages: list[dict[str, Any]]) -> int:
 
 
 def _retry_after_seconds(exc: Exception) -> float | None:
-    rate_limit = _find_in_chain(exc, lambda item: isinstance(item, RateLimitError))
+    rate_limit = _find_in_chain(exc, lambda item: isinstance(item, _RATE_LIMIT_ERRORS))
     if rate_limit is None:
         return None
 
@@ -313,12 +392,12 @@ def _retry_after_seconds(exc: Exception) -> float | None:
 def _is_transport_error(exc: Exception) -> bool:
     return _find_in_chain(
         exc,
-        lambda item: isinstance(item, (RateLimitError, APIConnectionError, APITimeoutError)),
+        lambda item: isinstance(item, _TRANSPORT_ERRORS),
     ) is not None
 
 
 def _is_rate_limited(exc: Exception) -> bool:
-    if _find_in_chain(exc, lambda item: isinstance(item, RateLimitError)) is not None:
+    if _find_in_chain(exc, lambda item: isinstance(item, _RATE_LIMIT_ERRORS)) is not None:
         return True
     message = " ".join(str(item) for item in _iter_exception_chain(exc)).casefold()
     return "rate limit" in message or "429" in message
@@ -382,13 +461,18 @@ class LLMClient:
     ) -> None:
         self.counter = counter or RUN_COUNTER
         self._semaphore = semaphore or asyncio.Semaphore(MAX_CONCURRENT)
+        self.provider = LLM_PROVIDER
         self.model = model or MODEL_ID
-        self._openai = AsyncOpenAI(max_retries=0)
-        self._client = instructor.from_openai(self._openai)
+        if self.provider == "anthropic":
+            self._sdk_client = AsyncAnthropic(max_retries=0)
+            self._client = from_anthropic(self._sdk_client, mode=Mode.TOOLS)
+        else:
+            self._sdk_client = AsyncOpenAI(max_retries=0)
+            self._client = instructor.from_openai(self._sdk_client)
         logging.getLogger("instructor").setLevel(logging.CRITICAL)
 
     async def aclose(self) -> None:
-        await self._openai.close()
+        await self._sdk_client.close()
 
     async def __aenter__(self) -> LLMClient:
         return self
@@ -411,7 +495,7 @@ class LLMClient:
                 await get_token_bucket().acquire(estimated_tokens)
                 async with self._semaphore:
                     _ensure_budget()
-                    return await self._client.chat.completions.create_with_completion(
+                    return await self._client.create_with_completion(
                         model=self.model,
                         messages=messages,
                         response_model=response_model,
@@ -425,7 +509,10 @@ class LLMClient:
                 validation_error = _is_validation_error(exc)
                 transport_error = _is_transport_error(exc) or _is_rate_limited(exc)
                 retryable = validation_error or transport_error
-                if not retryable or attempt >= MAX_REQUEST_ATTEMPTS:
+                # Retrying an absence sentinel never changes the answer: allow one retry.
+                sentinel_error = validation_error and exception_mentions_absent_sentinel(exc)
+                max_attempts = 2 if sentinel_error else MAX_REQUEST_ATTEMPTS
+                if not retryable or attempt >= max_attempts:
                     if validation_error:
                         message, raw = _format_validation_failure(exc)
                         raise LLMValidationError(message, raw_output=raw) from exc
@@ -439,7 +526,7 @@ class LLMClient:
                 logger.warning(
                     "LLM attempt %d/%d failed (%s): %s",
                     attempt,
-                    MAX_REQUEST_ATTEMPTS,
+                    max_attempts,
                     error_kind,
                     _root_cause(exc),
                 )
@@ -458,15 +545,13 @@ class LLMClient:
         response_model: type[T],
         messages: list[dict[str, Any]],
         use_cache: bool = True,
+        validation_context: dict[str, Any] | None = None,
         **params: Any,
     ) -> T:
-        request_params = {
-            "temperature": TEMPERATURE,
-            "seed": OPENAI_SEED,
-            **params,
-        }
+        request_params = _build_request_params(**params)
         serializable_messages = json.loads(json.dumps(messages, ensure_ascii=False))
         cache_key = _cache_key(
+            provider=self.provider,
             model=self.model,
             messages=serializable_messages,
             params=request_params,
@@ -490,11 +575,7 @@ class LLMClient:
             request_params=request_params,
         )
         usage = getattr(completion, "usage", None)
-        usage_dict = {
-            "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
-            "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
-            "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
-        }
+        usage_dict = _usage_fields(usage)
         cost = _record_usage(self.model, usage, self.counter)
         if RECORD_DIR is not None:
             _write_fixture(
@@ -511,6 +592,11 @@ class LLMClient:
                 usage=usage_dict,
                 cost_usd=cost,
             )
+        if validation_context is not None:
+            parsed = response_model.model_validate(
+                parsed.model_dump(mode="python"),
+                context=validation_context,
+            )
         return parsed
 
     async def complete_verified(
@@ -519,6 +605,7 @@ class LLMClient:
         response_model: type[T],
         messages: list[dict[str, Any]],
         quote_checks: Callable[[T], list[tuple[str, str, str]]],
+        validation_context: dict[str, Any] | None = None,
         **params: Any,
     ) -> T:
         from agent.evidence.quotes import apply_quote_verification_with_retry
@@ -526,6 +613,7 @@ class LLMClient:
         result = await self.complete(
             response_model=response_model,
             messages=messages,
+            validation_context=validation_context,
             **params,
         )
         if REPLAY_DIR is not None:
@@ -551,6 +639,7 @@ class LLMClient:
             result = await self.complete(
                 response_model=response_model,
                 messages=retry_messages,
+                validation_context=validation_context,
                 **params,
             )
             payload = result.model_dump(mode="python")
@@ -559,7 +648,10 @@ class LLMClient:
                 fields=quote_checks(result),
                 retried=True,
             )
-        return response_model.model_validate(payload)
+        return response_model.model_validate(
+            payload,
+            context=validation_context,
+        )
 
     async def complete_vision(
         self,
@@ -573,26 +665,18 @@ class LLMClient:
     ) -> T:
         content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
         for image_path in image_paths:
-            content.append(
-                {
-                    "type": "image_url",
-                    "image_url": {"url": _encode_image_data_url(image_path)},
-                },
-            )
+            content.append(vision_image_block(image_path))
 
         messages: list[dict[str, Any]] = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": content})
 
-        request_params = {
-            "temperature": TEMPERATURE,
-            "seed": OPENAI_SEED,
-            **params,
-        }
+        request_params = _build_request_params(**params)
         serializable_messages = json.loads(json.dumps(messages, ensure_ascii=False))
         image_digests = [_image_digest(path) for path in image_paths]
         cache_key = _cache_key(
+            provider=self.provider,
             model=self.model,
             messages=serializable_messages,
             params=request_params,
@@ -617,11 +701,7 @@ class LLMClient:
             request_params=request_params,
         )
         usage = getattr(completion, "usage", None)
-        usage_dict = {
-            "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
-            "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
-            "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
-        }
+        usage_dict = _usage_fields(usage)
         cost = _record_usage(self.model, usage, self.counter)
         if RECORD_DIR is not None:
             _write_fixture(
